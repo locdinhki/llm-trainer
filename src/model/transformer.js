@@ -1,4 +1,5 @@
-import { mulberry32, matVec, vecAdd, layerNorm, softmax, relu } from "./math.js";
+import { mulberry32, matVec, vecAdd, vecMul, rmsNorm, softmax, silu } from "./math.js";
+import { precomputeFreqs, applyRoPE } from "./rope.js";
 
 export function createTinyTransformer(config) {
   const { vocabSize, embedDim, ffnDim, seqLen, numBlocks = 1 } = config;
@@ -7,9 +8,6 @@ export function createTinyTransformer(config) {
 
   const params = {
     embedding: Array.from({ length: vocabSize }, () =>
-      Float32Array.from({ length: embedDim }, randn)
-    ),
-    posEmbedding: Array.from({ length: seqLen }, () =>
       Float32Array.from({ length: embedDim }, randn)
     ),
     blocks: [],
@@ -30,13 +28,13 @@ export function createTinyTransformer(config) {
       bv: new Float32Array(embedDim),
       bo: new Float32Array(embedDim),
       ln1_g: Float32Array.from({ length: embedDim }, () => 1),
-      ln1_b: new Float32Array(embedDim),
+      W_gate: Array.from({ length: ffnDim }, () => Float32Array.from({ length: embedDim }, randn)),
+      b_gate: new Float32Array(ffnDim),
       W1: Array.from({ length: ffnDim }, () => Float32Array.from({ length: embedDim }, randn)),
       b1: new Float32Array(ffnDim),
       W2: Array.from({ length: embedDim }, () => Float32Array.from({ length: ffnDim }, randn)),
       b2: new Float32Array(embedDim),
       ln2_g: Float32Array.from({ length: embedDim }, () => 1),
-      ln2_b: new Float32Array(embedDim),
     });
   }
 
@@ -48,19 +46,29 @@ export function forward(params, tokens, config) {
   const headDim = embedDim / numHeads;
   const len = tokens.length;
 
-  let hidden = tokens.map((t, pos) =>
-    vecAdd(params.embedding[t], params.posEmbedding[pos])
-  );
+  let hidden = tokens.map((t) => params.embedding[t].slice());
 
+  const freqs = precomputeFreqs(len, headDim);
   const allBlockAttnWeights = [];
 
   for (let blockIdx = 0; blockIdx < numBlocks; blockIdx++) {
     const block = params.blocks[blockIdx];
 
-    const normed = hidden.map((h) => layerNorm(h, block.ln1_g, block.ln1_b));
+    const normed = hidden.map((h) => rmsNorm(h, block.ln1_g));
     const Q = normed.map((h) => vecAdd(matVec(block.Wq, h), block.bq));
     const K = normed.map((h) => vecAdd(matVec(block.Wk, h), block.bk));
     const V = normed.map((h) => vecAdd(matVec(block.Wv, h), block.bv));
+
+    // Apply RoPE to Q and K per-head
+    for (let head = 0; head < numHeads; head++) {
+      const off = head * headDim;
+      for (let pos = 0; pos < len; pos++) {
+        const qSlice = Q[pos].slice(off, off + headDim);
+        const kSlice = K[pos].slice(off, off + headDim);
+        Q[pos].set(applyRoPE(qSlice, pos, freqs), off);
+        K[pos].set(applyRoPE(kSlice, pos, freqs), off);
+      }
+    }
 
     let attnOutputs = Array.from({ length: len }, () => new Float32Array(embedDim));
     let blockAttnWeights = [];
@@ -100,9 +108,12 @@ export function forward(params, tokens, config) {
     const attnProj = attnOutputs.map((h) => vecAdd(matVec(block.Wo, h), block.bo));
     hidden = hidden.map((h, i) => vecAdd(h, attnProj[i]));
 
-    const normed2 = hidden.map((h) => layerNorm(h, block.ln2_g, block.ln2_b));
-    const ffn1 = normed2.map((h) => relu(vecAdd(matVec(block.W1, h), block.b1)));
-    const ffn2 = ffn1.map((h) => vecAdd(matVec(block.W2, h), block.b2));
+    const normed2 = hidden.map((h) => rmsNorm(h, block.ln2_g));
+    // SwiGLU: gate = silu(W_gate @ x), up = W1 @ x, out = W2 @ (gate * up)
+    const gate = normed2.map((h) => silu(vecAdd(matVec(block.W_gate, h), block.b_gate)));
+    const up = normed2.map((h) => vecAdd(matVec(block.W1, h), block.b1));
+    const gated = gate.map((g, i) => vecMul(g, up[i]));
+    const ffn2 = gated.map((h) => vecAdd(matVec(block.W2, h), block.b2));
     hidden = hidden.map((h, i) => vecAdd(h, ffn2[i]));
   }
 
@@ -122,7 +133,6 @@ export function countParameters(params) {
     }
   }
   countArray(params.embedding);
-  countArray(params.posEmbedding);
   countArray(params.Wout);
   countArray(params.bout);
   for (const block of params.blocks) {

@@ -1,4 +1,5 @@
-import { softmax, vecAddInPlace } from "./math.js";
+import { softmax, vecAddInPlace, vecMul, siluBackward } from "./math.js";
+import { precomputeFreqs, applyRoPEBackward } from "./rope.js";
 
 // --- Backward primitives ---
 
@@ -22,51 +23,36 @@ export function reluBackward(preAct, dOut) {
   return dX;
 }
 
-export function layerNormBackward(x, g, dOut) {
+export function rmsNormBackward(x, gamma, dOut) {
   const n = x.length;
 
   // Recompute forward stats
-  let sum = 0, sum2 = 0;
-  for (let i = 0; i < n; i++) {
-    sum += x[i];
-    sum2 += x[i] * x[i];
-  }
-  const mean = sum / n;
-  const variance = sum2 / n - mean * mean;
-  const invStd = 1 / Math.sqrt(variance + 1e-5);
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) sumSq += x[i] * x[i];
+  const rms = Math.sqrt(sumSq / n + 1e-6);
+  const invRms = 1 / rms;
 
-  const xHat = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    xHat[i] = (x[i] - mean) * invStd;
-  }
+  // xNorm[i] = x[i] / rms
+  const xNorm = new Float32Array(n);
+  for (let i = 0; i < n; i++) xNorm[i] = x[i] * invRms;
 
-  // Gradients for gamma and beta
+  // dGamma[i] = dOut[i] * xNorm[i]
   const dGamma = new Float32Array(n);
-  const dBeta = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    dGamma[i] = dOut[i] * xHat[i];
-    dBeta[i] = dOut[i];
-  }
+  for (let i = 0; i < n; i++) dGamma[i] = dOut[i] * xNorm[i];
 
-  // Gradient for input x
-  // dxhat[i] = dOut[i] * g[i]
-  // dx[i] = invStd * (dxhat[i] - mean(dxhat) - xHat[i] * mean(dxhat * xHat))
-  let meanDxhat = 0;
-  let meanDxhatXhat = 0;
-  for (let i = 0; i < n; i++) {
-    const dxh = dOut[i] * g[i];
-    meanDxhat += dxh;
-    meanDxhatXhat += dxh * xHat[i];
-  }
-  meanDxhat /= n;
-  meanDxhatXhat /= n;
+  // dX: chain rule through rmsNorm
+  // out[i] = gamma[i] * x[i] / rms
+  // dL/dx[i] = gamma[i] * dOut[i] / rms - (x[i] / (n * rms^3)) * sum_j(gamma[j] * dOut[j] * x[j])
+  let dotGradX = 0;
+  for (let i = 0; i < n; i++) dotGradX += gamma[i] * dOut[i] * x[i];
 
   const dX = new Float32Array(n);
+  const invRms3 = invRms / (rms * rms);
   for (let i = 0; i < n; i++) {
-    dX[i] = invStd * (dOut[i] * g[i] - meanDxhat - xHat[i] * meanDxhatXhat);
+    dX[i] = gamma[i] * dOut[i] * invRms - x[i] * dotGradX * invRms3 / n;
   }
 
-  return { dX, dGamma, dBeta };
+  return { dX, dGamma };
 }
 
 // matVec backward: out = mat * vec
@@ -118,7 +104,6 @@ export function createZeroGrads(params, config) {
   const { vocabSize, embedDim, ffnDim, seqLen, numBlocks = 1 } = config;
   const grads = {
     embedding: zeros2D(vocabSize, embedDim),
-    posEmbedding: zeros2D(seqLen, embedDim),
     Wout: zeros2D(vocabSize, embedDim),
     bout: zeros1D(vocabSize),
     blocks: [],
@@ -134,13 +119,13 @@ export function createZeroGrads(params, config) {
       bv: zeros1D(embedDim),
       bo: zeros1D(embedDim),
       ln1_g: zeros1D(embedDim),
-      ln1_b: zeros1D(embedDim),
+      W_gate: zeros2D(ffnDim, embedDim),
+      b_gate: zeros1D(ffnDim),
       W1: zeros2D(ffnDim, embedDim),
       b1: zeros1D(ffnDim),
       W2: zeros2D(embedDim, ffnDim),
       b2: zeros1D(embedDim),
       ln2_g: zeros1D(embedDim),
-      ln2_b: zeros1D(embedDim),
     });
   }
   return grads;
@@ -152,6 +137,7 @@ export function backward(params, cache, target, config, grads) {
   const { embedDim, numHeads, numBlocks = 1 } = config;
   const headDim = embedDim / numHeads;
   const len = cache.tokens.length;
+  const freqs = precomputeFreqs(len, headDim);
 
   // 1. Loss gradient: dLogits = softmax(logits) - one_hot(target)
   const probs = softmax(cache.logits);
@@ -188,26 +174,40 @@ export function backward(params, cache, target, config, grads) {
       dFfn2[pos] = dHidden[pos].slice(); // copy, since residual keeps dHidden
     }
 
-    // --- FFN2 backward: ffn2[pos] = matVec(W2, ffn1[pos]) + b2 ---
+    // --- SwiGLU FFN backward ---
+    // Forward was: gate = silu(W_gate @ normed2 + b_gate), up = W1 @ normed2 + b1
+    //              gated = gate * up, ffn2 = W2 @ gated + b2
     for (let pos = 0; pos < len; pos++) {
-      const { dMat: dW2, dVec: dFfn1 } = matVecBackward(block.W2, bc.ffn1[pos], dFfn2[pos]);
+      // W2 backward: ffn2 = matVec(W2, gated) + b2
+      const { dMat: dW2, dVec: dGated } = matVecBackward(block.W2, bc.gated[pos], dFfn2[pos]);
       addMat(gBlock.W2, dW2);
       vecAddInPlace(gBlock.b2, dFfn2[pos]);
 
-      // --- ReLU backward ---
-      const dFfn1Pre = reluBackward(bc.ffn1Pre[pos], dFfn1);
+      // Product rule: gated = gate * up
+      const dGate = vecMul(dGated, bc.up[pos]);
+      const dUp = vecMul(dGated, bc.gate[pos]);
 
-      // --- FFN1 backward: ffn1Pre[pos] = matVec(W1, normed2[pos]) + b1 ---
-      const { dMat: dW1, dVec: dNormed2 } = matVecBackward(block.W1, bc.normed2[pos], dFfn1Pre);
+      // Gate backward: gate = silu(W_gate @ normed2 + b_gate)
+      const dGatePre = siluBackward(bc.gatePre[pos], dGate);
+      const { dMat: dW_gate, dVec: dNormed2_gate } = matVecBackward(block.W_gate, bc.normed2[pos], dGatePre);
+      addMat(gBlock.W_gate, dW_gate);
+      vecAddInPlace(gBlock.b_gate, dGatePre);
+
+      // Up backward: up = W1 @ normed2 + b1 (no activation)
+      const { dMat: dW1, dVec: dNormed2_up } = matVecBackward(block.W1, bc.normed2[pos], dUp);
       addMat(gBlock.W1, dW1);
-      vecAddInPlace(gBlock.b1, dFfn1Pre);
+      vecAddInPlace(gBlock.b1, dUp);
 
-      // --- LN2 backward ---
-      const { dX: dPreNorm2, dGamma: dLn2G, dBeta: dLn2B } = layerNormBackward(
+      // Combine both paths to dNormed2
+      const dNormed2 = zeros1D(embedDim);
+      vecAddInPlace(dNormed2, dNormed2_gate);
+      vecAddInPlace(dNormed2, dNormed2_up);
+
+      // --- RMSNorm2 backward ---
+      const { dX: dPreNorm2, dGamma: dLn2G } = rmsNormBackward(
         bc.preNorm2[pos], block.ln2_g, dNormed2
       );
       vecAddInPlace(gBlock.ln2_g, dLn2G);
-      vecAddInPlace(gBlock.ln2_b, dLn2B);
 
       // Add to residual path (dHidden already has the residual gradient)
       vecAddInPlace(dHidden[pos], dPreNorm2);
@@ -275,6 +275,17 @@ export function backward(params, cache, target, config, grads) {
       }
     }
 
+    // --- RoPE backward: un-rotate dQ and dK ---
+    for (let head = 0; head < numHeads; head++) {
+      const off = head * headDim;
+      for (let pos = 0; pos < len; pos++) {
+        const dqSlice = dQ[pos].slice(off, off + headDim);
+        const dkSlice = dK[pos].slice(off, off + headDim);
+        dQ[pos].set(applyRoPEBackward(dqSlice, pos, freqs), off);
+        dK[pos].set(applyRoPEBackward(dkSlice, pos, freqs), off);
+      }
+    }
+
     // --- Q, K, V projection backward ---
     const dNormed1 = new Array(len);
     for (let pos = 0; pos < len; pos++) {
@@ -301,23 +312,21 @@ export function backward(params, cache, target, config, grads) {
       vecAddInPlace(dNormed1[pos], dN1_v);
     }
 
-    // --- LN1 backward ---
+    // --- RMSNorm1 backward ---
     for (let pos = 0; pos < len; pos++) {
-      const { dX: dPreNorm1, dGamma: dLn1G, dBeta: dLn1B } = layerNormBackward(
+      const { dX: dPreNorm1, dGamma: dLn1G } = rmsNormBackward(
         bc.preNorm1[pos], block.ln1_g, dNormed1[pos]
       );
       vecAddInPlace(gBlock.ln1_g, dLn1G);
-      vecAddInPlace(gBlock.ln1_b, dLn1B);
 
-      // Add LN1 grad to residual path
+      // Add RMSNorm1 grad to residual path
       vecAddInPlace(dHidden[pos], dPreNorm1);
     }
   }
 
-  // 5. Embedding backward: hidden[pos] = embedding[token] + posEmbedding[pos]
+  // 5. Embedding backward: hidden[pos] = embedding[token] (no posEmbedding — RoPE)
   for (let pos = 0; pos < len; pos++) {
     const token = cache.tokens[pos];
     vecAddInPlace(grads.embedding[token], dHidden[pos]);
-    vecAddInPlace(grads.posEmbedding[pos], dHidden[pos]);
   }
 }

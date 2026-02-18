@@ -81,7 +81,7 @@ function countParams(p) {
     if (arr[0]?.length !== undefined) arr.forEach((r) => (count += r.length));
     else count += arr.length;
   }
-  c(p.embedding); c(p.posEmbedding); c(p.Wout); c(p.bout);
+  c(p.embedding); c(p.Wout); c(p.bout);
   for (const block of p.blocks) {
     for (const key of Object.keys(block)) c(block[key]);
   }

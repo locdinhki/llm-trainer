@@ -32,6 +32,13 @@ export function vecAdd(a, b) {
   return result;
 }
 
+export function vecMul(a, b) {
+  const n = a.length;
+  const result = new Float32Array(n);
+  for (let i = 0; i < n; i++) result[i] = a[i] * b[i];
+  return result;
+}
+
 export function vecAddInPlace(target, source) {
   for (let i = 0; i < target.length; i++) {
     target[i] += source[i];
@@ -53,6 +60,16 @@ export function layerNorm(x, g, b) {
     result[i] = g[i] * ((x[i] - mean) * invStd) + b[i];
   }
   return result;
+}
+
+export function rmsNorm(x, gamma) {
+  const n = x.length;
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) sumSq += x[i] * x[i];
+  const rms = Math.sqrt(sumSq / n + 1e-6);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = gamma[i] * (x[i] / rms);
+  return out;
 }
 
 export function softmax(x) {

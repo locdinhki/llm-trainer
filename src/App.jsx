@@ -1,0 +1,619 @@
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import { softmax } from "./model/math.js";
+import { createTinyTransformer, forward, countParameters } from "./model/transformer.js";
+import { trainStepBackprop, verifyGradients } from "./model/training.js";
+import { DEFAULT_SENTENCES, buildVocabulary, makeTrainingData, generatePrompts } from "./model/data.js";
+
+import PredictionPanel from "./components/PredictionPanel.jsx";
+import EmbeddingPanel from "./components/EmbeddingPanel.jsx";
+import AttentionPanel from "./components/AttentionPanel.jsx";
+import LossPanel from "./components/LossPanel.jsx";
+import SettingsPanel from "./components/SettingsPanel.jsx";
+import TrainingLog from "./components/TrainingLog.jsx";
+
+export default function App() {
+  // Model config
+  const [config, setConfig] = useState({
+    embedDim: 16,
+    numHeads: 2,
+    ffnDim: 32,
+    seqLen: 10,
+    numBlocks: 1,
+  });
+  const [learningRate, setLearningRate] = useState(0.01);
+
+  // Sentences
+  const [sentences, setSentences] = useState(DEFAULT_SENTENCES);
+  const [sentencesInput, setSentencesInput] = useState(DEFAULT_SENTENCES.join("\n"));
+
+  // UI state
+  const [showSettings, setShowSettings] = useState(false);
+  const [step, setStep] = useState(0);
+  const [lossHistory, setLossHistory] = useState([]);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const [maxSpeed, setMaxSpeed] = useState(false);
+  const [selectedPrompt, setSelectedPrompt] = useState(0);
+
+  // Visualization state
+  const [probs, setProbs] = useState([]);
+  const [attnWeights, setAttnWeights] = useState([]);
+  const [embeddingSnapshot, setEmbeddingSnapshot] = useState([]);
+
+  // Training log
+  const [logs, setLogs] = useState([]);
+
+  // Refs
+  const paramsRef = useRef(null);
+  const playingRef = useRef(false);
+  const trainingData = useRef([]);
+  const stepRef = useRef(0);
+  const lossBufferRef = useRef([]);       // Buffer losses between render frames
+  const vizDirtyRef = useRef(false);      // Flag: training happened since last render
+  const selectedPromptRef = useRef(0);
+  const maxSpeedRef = useRef(false);
+  const learningRateRef = useRef(0.01);
+  const activeConfigRef = useRef(null);
+  const promptsRef = useRef([]);
+  const id2wordRef = useRef({});
+  const logBufferRef = useRef([]);
+
+  // Derived data
+  const vocab = useMemo(() => buildVocabulary(sentences), [sentences]);
+  const { word2id, id2word, vocabSize, wordCategories } = vocab;
+
+  const prompts = useMemo(
+    () => generatePrompts(sentences, word2id),
+    [sentences, word2id]
+  );
+
+  const activeConfig = useMemo(() => ({
+    ...config,
+    vocabSize,
+  }), [config, vocabSize]);
+
+  const [paramCount, setParamCount] = useState(0);
+
+  // Logging helper
+  const addLog = useCallback((message, type = "info") => {
+    setLogs((prev) => {
+      const next = [...prev, { message, type }];
+      if (next.length > 200) return next.slice(-200);
+      return next;
+    });
+  }, []);
+
+  // Initialize / reinitialize model when config or sentences change
+  const configKey = JSON.stringify(activeConfig) + JSON.stringify(sentences);
+  useEffect(() => {
+    setIsPlaying(false);
+    playingRef.current = false;
+    paramsRef.current = createTinyTransformer(activeConfig);
+    trainingData.current = makeTrainingData(sentences, word2id);
+    const count = countParameters(paramsRef.current);
+    setParamCount(count);
+    setStep(0);
+    stepRef.current = 0;
+    setLossHistory([]);
+    setAttnWeights([]);
+    setEmbeddingSnapshot([]);
+    setProbs(Array(vocabSize).fill(1 / vocabSize));
+    setSelectedPrompt((prev) => Math.min(prev, Math.max(0, prompts.length - 1)));
+
+    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${vocabSize} vocab | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads`, "config");
+
+    // Verify gradients in development
+    if (import.meta.env.DEV && trainingData.current.length > 0) {
+      const { passed, maxRelError } = verifyGradients(paramsRef.current, trainingData.current, activeConfig);
+      addLog(`[Verify] Gradient check: ${passed ? "PASSED" : "FAILED"} (max rel error: ${maxRelError.toExponential(2)})`, passed ? "success" : "warning");
+    }
+
+    // Run initial visualization
+    if (prompts.length > 0) {
+      const prompt = prompts[0];
+      const result = forward(paramsRef.current, prompt.tokens, activeConfig);
+      const probabilities = softmax(result.logits);
+      setProbs(probabilities);
+      setAttnWeights(result.attnWeights);
+      setEmbeddingSnapshot(paramsRef.current.embedding.map((e) => [...e]));
+    }
+  }, [configKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep refs in sync with state (avoids stale closures in training loop)
+  selectedPromptRef.current = selectedPrompt;
+  maxSpeedRef.current = maxSpeed;
+  learningRateRef.current = learningRate;
+  activeConfigRef.current = activeConfig;
+  promptsRef.current = prompts;
+  id2wordRef.current = id2word;
+
+  // Update visualization (used for manual step & prompt changes)
+  const updateVisualization = useCallback(
+    (params, promptIdx) => {
+      if (!prompts.length || !params) return;
+      const prompt = prompts[promptIdx ?? selectedPrompt] || prompts[0];
+      if (!prompt) return;
+      const result = forward(params, prompt.tokens, activeConfig);
+      const probabilities = softmax(result.logits);
+      setProbs(probabilities);
+      setAttnWeights(result.attnWeights);
+      setEmbeddingSnapshot(params.embedding.map((e) => [...e]));
+    },
+    [selectedPrompt, prompts, activeConfig]
+  );
+
+  // Single manual training step (Step button)
+  const doStep = useCallback(() => {
+    if (!paramsRef.current) return;
+    const cfg = activeConfigRef.current;
+    const loss = trainStepBackprop(paramsRef.current, trainingData.current, cfg, learningRateRef.current);
+    stepRef.current += 1;
+    setStep(stepRef.current);
+    setLossHistory((h) => {
+      const next = [...h, loss];
+      if (next.length > 500) return next.slice(-500);
+      return next;
+    });
+    updateVisualization(paramsRef.current, selectedPromptRef.current);
+
+    const prompt = promptsRef.current[selectedPromptRef.current] || promptsRef.current[0];
+    if (prompt) {
+      const result = forward(paramsRef.current, prompt.tokens, cfg);
+      const p = softmax(result.logits);
+      let topIdx = 0;
+      for (let i = 1; i < p.length; i++) { if (p[i] > p[topIdx]) topIdx = i; }
+      const topWord = id2wordRef.current[topIdx];
+      const topProb = p[topIdx];
+      const correct = topWord === prompt.target;
+      addLog(
+        `[Step ${stepRef.current}] Loss: ${loss.toFixed(4)} | "${prompt.target}" → "${topWord}" (${(topProb * 100).toFixed(1)}%) ${correct ? "✓" : "✗"}`,
+        correct ? "success" : "warning"
+      );
+    }
+  }, [updateVisualization, addLog]);
+
+  // Auto-play: decoupled training loop + rAF render loop
+  useEffect(() => {
+    playingRef.current = isPlaying;
+    if (!isPlaying) return;
+
+    let mounted = true;
+    lossBufferRef.current = [];
+    logBufferRef.current = [];
+    vizDirtyRef.current = false;
+
+    // Training loop — runs as fast as possible, doesn't touch React state
+    const trainLoop = () => {
+      if (!mounted || !playingRef.current) return;
+      const cfg = activeConfigRef.current;
+      const params = paramsRef.current;
+      if (!params || !cfg) return;
+
+      const batchSize = maxSpeedRef.current ? 10 : 1;
+      for (let i = 0; i < batchSize && mounted && playingRef.current; i++) {
+        const loss = trainStepBackprop(params, trainingData.current, cfg, learningRateRef.current);
+        stepRef.current += 1;
+        lossBufferRef.current.push(loss);
+        vizDirtyRef.current = true;
+
+        // Buffer log entries (every 20th step in maxSpeed, every step otherwise)
+        if (!maxSpeedRef.current || stepRef.current % 20 === 0) {
+          const prompt = promptsRef.current[selectedPromptRef.current] || promptsRef.current[0];
+          if (prompt) {
+            const result = forward(params, prompt.tokens, cfg);
+            const p = softmax(result.logits);
+            let topIdx = 0;
+            for (let k = 1; k < p.length; k++) { if (p[k] > p[topIdx]) topIdx = k; }
+            const topWord = id2wordRef.current[topIdx];
+            const topProb = p[topIdx];
+            const correct = topWord === prompt.target;
+            logBufferRef.current.push({
+              message: `[Step ${stepRef.current}] Loss: ${loss.toFixed(4)} | "${prompt.target}" → "${topWord}" (${(topProb * 100).toFixed(1)}%) ${correct ? "✓" : "✗"}`,
+              type: correct ? "success" : "warning",
+            });
+          }
+        }
+
+        // Convergence check: every 50 steps, test all prompts
+        if (stepRef.current % 50 === 0) {
+          const allPrompts = promptsRef.current;
+          let allCorrect = allPrompts.length > 0;
+          for (let pi = 0; pi < allPrompts.length; pi++) {
+            const pr = allPrompts[pi];
+            const res = forward(params, pr.tokens, cfg);
+            const p = softmax(res.logits);
+            let top = 0;
+            for (let k = 1; k < p.length; k++) { if (p[k] > p[top]) top = k; }
+            if (id2wordRef.current[top] !== pr.target) { allCorrect = false; break; }
+          }
+          if (allCorrect) {
+            logBufferRef.current.push({
+              message: `[Step ${stepRef.current}] All ${allPrompts.length} prompts correct — training complete`,
+              type: "success",
+            });
+            playingRef.current = false;
+            setIsPlaying(false);
+            break;
+          }
+        }
+      }
+
+      if (!playingRef.current) return;
+      if (maxSpeedRef.current) {
+        setTimeout(trainLoop, 0);
+      } else {
+        setTimeout(trainLoop, Math.max(50, 500 / speed));
+      }
+    };
+
+    // Render loop — syncs buffered data to React state at screen refresh rate
+    let rafId;
+    const renderLoop = () => {
+      if (!mounted) return;
+
+      // Flush loss buffer to state
+      if (lossBufferRef.current.length > 0) {
+        const newLosses = lossBufferRef.current;
+        lossBufferRef.current = [];
+        setLossHistory((h) => {
+          const next = h.concat(newLosses);
+          if (next.length > 500) return next.slice(-500);
+          return next;
+        });
+        setStep(stepRef.current);
+      }
+
+      // Flush log buffer
+      if (logBufferRef.current.length > 0) {
+        const newLogs = logBufferRef.current;
+        logBufferRef.current = [];
+        setLogs((prev) => {
+          const next = prev.concat(newLogs);
+          if (next.length > 200) return next.slice(-200);
+          return next;
+        });
+      }
+
+      // Update visualization once per frame
+      if (vizDirtyRef.current && paramsRef.current) {
+        vizDirtyRef.current = false;
+        const cfg = activeConfigRef.current;
+        const prompt = promptsRef.current[selectedPromptRef.current] || promptsRef.current[0];
+        if (prompt && cfg) {
+          const result = forward(paramsRef.current, prompt.tokens, cfg);
+          const probabilities = softmax(result.logits);
+          setProbs(probabilities);
+          setAttnWeights(result.attnWeights);
+          setEmbeddingSnapshot(paramsRef.current.embedding.map((e) => [...e]));
+        }
+      }
+
+      rafId = requestAnimationFrame(renderLoop);
+    };
+
+    trainLoop();
+    rafId = requestAnimationFrame(renderLoop);
+
+    return () => {
+      mounted = false;
+      cancelAnimationFrame(rafId);
+    };
+  }, [isPlaying, speed]);
+
+  // Reset
+  const handleReset = () => {
+    setIsPlaying(false);
+    playingRef.current = false;
+    paramsRef.current = createTinyTransformer(activeConfig);
+    trainingData.current = makeTrainingData(sentences, word2id);
+    setParamCount(countParameters(paramsRef.current));
+    setStep(0);
+    stepRef.current = 0;
+    setLossHistory([]);
+    setSelectedPrompt(0);
+    if (prompts.length > 0) {
+      updateVisualization(paramsRef.current, 0);
+    }
+    addLog("[Reset] Model re-initialized", "config");
+  };
+
+  // Prompt change
+  const handlePromptChange = (idx) => {
+    setSelectedPrompt(idx);
+    if (paramsRef.current) {
+      updateVisualization(paramsRef.current, idx);
+    }
+  };
+
+  // Apply custom sentences
+  const handleApplySentences = () => {
+    const lines = sentencesInput
+      .split("\n")
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.split(/\s+/).length >= 2);
+    if (lines.length === 0) return;
+    const maxLen = Math.max(...lines.map((s) => s.split(/\s+/).length));
+    setSentences(lines);
+    setConfig((prev) => ({ ...prev, seqLen: Math.max(prev.seqLen, maxLen + 2) }));
+    setShowSettings(false);
+    addLog(`[Config] Applied ${lines.length} sentences`, "config");
+  };
+
+  // Current prediction info
+  const currentPrompt = prompts[selectedPrompt] || prompts[0] || { tokens: [], label: "", target: "" };
+  const inputWords = currentPrompt.tokens.map((t) => id2word[t]);
+  const topPrediction = probs.length > 0 ? id2word[probs.indexOf(Math.max(...probs))] : "";
+  const topProb = probs.length > 0 ? Math.max(...probs) : 0;
+  const isCorrect = topPrediction === currentPrompt.target;
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#0a0e17",
+      color: "#e2e8f0",
+      fontFamily: "'Inter', 'SF Pro Display', -apple-system, sans-serif",
+      padding: 24,
+    }}>
+      {showSettings && (
+        <SettingsPanel
+          config={config}
+          onConfigChange={(newConfig) => {
+            setIsPlaying(false);
+            setConfig(newConfig);
+          }}
+          learningRate={learningRate}
+          onLearningRateChange={setLearningRate}
+          sentencesInput={sentencesInput}
+          onSentencesInputChange={setSentencesInput}
+          onApplySentences={handleApplySentences}
+          paramCount={paramCount}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+        {/* Header */}
+        <div style={{ marginBottom: 24, textAlign: "center" }}>
+          <h1 style={{
+            fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+            fontSize: 24,
+            fontWeight: 700,
+            background: "linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6)",
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+            marginBottom: 6,
+          }}>
+            Tiny Transformer — Live Training
+          </h1>
+          <p style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 12,
+            color: "#475569",
+          }}>
+            {vocabSize} words · {activeConfig.embedDim}d · {activeConfig.numHeads} heads · {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""} · {paramCount.toLocaleString()} params · lr={learningRate}
+          </p>
+        </div>
+
+        {/* Controls */}
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 12,
+          marginBottom: 20,
+          flexWrap: "wrap",
+        }}>
+          <button
+            onClick={() => setShowSettings(true)}
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              color: "#94a3b8",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 10,
+              padding: "10px 20px",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            ⚙ Settings
+          </button>
+          <button
+            onClick={doStep}
+            disabled={isPlaying}
+            style={{
+              background: isPlaying ? "rgba(255,255,255,0.04)" : "linear-gradient(135deg, #3b82f6, #6366f1)",
+              color: isPlaying ? "#475569" : "white",
+              border: "none",
+              borderRadius: 10,
+              padding: "10px 20px",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: isPlaying ? "default" : "pointer",
+              letterSpacing: 0.5,
+            }}
+          >
+            ▶ Step
+          </button>
+          <button
+            onClick={() => setIsPlaying(!isPlaying)}
+            style={{
+              background: isPlaying ? "linear-gradient(135deg, #ef4444, #f97316)" : "linear-gradient(135deg, #22c55e, #10b981)",
+              color: "white",
+              border: "none",
+              borderRadius: 10,
+              padding: "10px 20px",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+              letterSpacing: 0.5,
+            }}
+          >
+            {isPlaying ? "⏸ Pause" : "⏵ Play"}
+          </button>
+          <button
+            onClick={handleReset}
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              color: "#94a3b8",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 10,
+              padding: "10px 20px",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            ↺ Reset
+          </button>
+
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8,
+            background: "rgba(255,255,255,0.04)",
+            borderRadius: 10,
+            padding: "6px 16px",
+            border: "1px solid rgba(255,255,255,0.06)",
+          }}>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#64748b" }}>Speed</span>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              value={speed}
+              onChange={(e) => setSpeed(Number(e.target.value))}
+              disabled={maxSpeed}
+              style={{ width: 80, accentColor: "#6366f1", opacity: maxSpeed ? 0.3 : 1 }}
+            />
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#94a3b8", width: 24 }}>
+              {maxSpeed ? "∞" : `${speed}x`}
+            </span>
+          </div>
+
+          <button
+            onClick={() => setMaxSpeed(!maxSpeed)}
+            style={{
+              background: maxSpeed ? "linear-gradient(135deg, #f59e0b, #f97316)" : "rgba(255,255,255,0.06)",
+              color: maxSpeed ? "#0f172a" : "#64748b",
+              border: maxSpeed ? "none" : "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 10,
+              padding: "10px 14px",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {maxSpeed ? "⚡ MAX" : "⚡ Max"}
+          </button>
+
+          <div style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 14,
+            color: "#a78bfa",
+            fontWeight: 700,
+            background: "rgba(167, 139, 250, 0.08)",
+            padding: "8px 16px",
+            borderRadius: 10,
+            border: "1px solid rgba(167, 139, 250, 0.15)",
+          }}>
+            Step {step}
+          </div>
+        </div>
+
+        {/* Prompt Selector */}
+        <div style={{
+          display: "flex",
+          justifyContent: "center",
+          gap: 8,
+          marginBottom: 20,
+          flexWrap: "wrap",
+        }}>
+          {prompts.map((p, i) => (
+            <button
+              key={i}
+              onClick={() => handlePromptChange(i)}
+              style={{
+                background: selectedPrompt === i ? "rgba(96, 165, 250, 0.15)" : "rgba(255,255,255,0.04)",
+                color: selectedPrompt === i ? "#60a5fa" : "#64748b",
+                border: `1px solid ${selectedPrompt === i ? "rgba(96,165,250,0.3)" : "rgba(255,255,255,0.06)"}`,
+                borderRadius: 8,
+                padding: "6px 14px",
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 11,
+                cursor: "pointer",
+              }}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Status banner */}
+        {step > 0 && currentPrompt.target && (
+          <div style={{
+            textAlign: "center",
+            marginBottom: 16,
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 13,
+            padding: "8px 16px",
+            borderRadius: 10,
+            background: isCorrect ? "rgba(74, 222, 128, 0.08)" : "rgba(251, 146, 60, 0.08)",
+            border: `1px solid ${isCorrect ? "rgba(74,222,128,0.2)" : "rgba(251,146,60,0.15)"}`,
+            color: isCorrect ? "#4ade80" : "#fb923c",
+          }}>
+            Prediction: <strong>{topPrediction}</strong> ({(topProb * 100).toFixed(1)}%)
+            {isCorrect ? " ✓ Correct!" : ` ✗ Expected: ${currentPrompt.target}`}
+          </div>
+        )}
+
+        {/* Dashboard Grid */}
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 16,
+          maxWidth: 1200,
+          margin: "0 auto",
+        }}>
+          <PredictionPanel
+            probs={probs}
+            targetWord={currentPrompt.target}
+            inputWords={inputWords}
+            vocabSize={vocabSize}
+            id2word={id2word}
+            wordCategories={wordCategories}
+            maxSpeed={maxSpeed}
+          />
+          <EmbeddingPanel
+            embeddings={embeddingSnapshot.length > 0 ? embeddingSnapshot : Array.from({ length: vocabSize }, () => Array(activeConfig.embedDim).fill(0))}
+            id2word={id2word}
+            wordCategories={wordCategories}
+          />
+          <AttentionPanel
+            attnWeights={attnWeights}
+            inputWords={inputWords}
+            numHeads={activeConfig.numHeads}
+            numBlocks={activeConfig.numBlocks}
+            maxSpeed={maxSpeed}
+          />
+          <LossPanel lossHistory={lossHistory} vocabSize={vocabSize} />
+          <TrainingLog logs={logs} />
+        </div>
+
+        {/* Footer */}
+        <div style={{
+          textAlign: "center",
+          marginTop: 20,
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 10,
+          color: "#334155",
+        }}>
+          Pure JavaScript transformer · No ML frameworks · Backpropagation · {vocabSize} tokens × {activeConfig.embedDim}d × {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""}
+        </div>
+      </div>
+    </div>
+  );
+}

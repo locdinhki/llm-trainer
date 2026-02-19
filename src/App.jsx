@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { softmax } from "./model/math.js";
 import { createTinyTransformer, forward, countParameters } from "./model/transformer.js";
 import { trainStepMiniBatch, createAdamState, getLearningRate, verifyGradients } from "./model/training.js";
-import { DEFAULT_SENTENCES, buildWordTokenizer, buildBPETokenizer, CATEGORY_COLORS, makeTrainingData, generatePrompts } from "./model/data.js";
+import { DEFAULT_SENTENCES, CORPUS_PRESETS, computeCorpusStats, buildWordTokenizer, buildBPETokenizer, CATEGORY_COLORS, makeTrainingData, generatePrompts } from "./model/data.js";
 import { saveCheckpoint, loadCheckpoint } from "./model/checkpoint.js";
 
 import PredictionPanel from "./components/PredictionPanel.jsx";
@@ -34,7 +34,8 @@ export default function App() {
   const [tokenizerMode, setTokenizerMode] = useState("word"); // "word" | "bpe"
   const [bpeVocabSize, setBpeVocabSize] = useState(200);
 
-  // Sentences
+  // Corpus & Sentences
+  const [corpusPreset, setCorpusPreset] = useState("simple"); // "simple" | "stories" | "custom"
   const [sentences, setSentences] = useState(DEFAULT_SENTENCES);
   const [sentencesInput, setSentencesInput] = useState(DEFAULT_SENTENCES.join("\n"));
 
@@ -417,6 +418,21 @@ export default function App() {
     }
   };
 
+  // Switch corpus preset
+  const handleCorpusChange = useCallback((preset) => {
+    setCorpusPreset(preset);
+    if (preset === "custom") return; // keep current sentences until user applies
+    const corpus = CORPUS_PRESETS[preset];
+    if (!corpus) return;
+    const newSentences = corpus.sentences;
+    const stats = computeCorpusStats(newSentences);
+    const maxLen = Math.max(...newSentences.map((s) => s.split(/\s+/).length));
+    setSentences(newSentences);
+    setSentencesInput(newSentences.join("\n"));
+    setConfig((prev) => ({ ...prev, seqLen: Math.max(4, maxLen + 2) }));
+    addLog(`[Config] Loaded '${corpus.label}' corpus (${stats.sentenceCount} sentences, ${stats.uniqueWords} unique words)`, "config");
+  }, [addLog]);
+
   // Apply custom sentences
   const handleApplySentences = () => {
     const lines = sentencesInput
@@ -426,9 +442,10 @@ export default function App() {
     if (lines.length === 0) return;
     const maxLen = Math.max(...lines.map((s) => s.split(/\s+/).length));
     setSentences(lines);
+    setCorpusPreset("custom");
     setConfig((prev) => ({ ...prev, seqLen: Math.max(prev.seqLen, maxLen + 2) }));
     setShowSettings(false);
-    addLog(`[Config] Applied ${lines.length} sentences`, "config");
+    addLog(`[Config] Applied ${lines.length} custom sentences`, "config");
   };
 
   // Checkpoint save/load
@@ -516,6 +533,9 @@ export default function App() {
           onWarmupStepsChange={setWarmupSteps}
           totalSteps={totalSteps}
           onTotalStepsChange={setTotalSteps}
+          corpusPreset={corpusPreset}
+          onCorpusChange={handleCorpusChange}
+          sentences={sentences}
           sentencesInput={sentencesInput}
           onSentencesInputChange={setSentencesInput}
           onApplySentences={handleApplySentences}

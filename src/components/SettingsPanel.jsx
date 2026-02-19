@@ -1,4 +1,6 @@
+import { useMemo } from "react";
 import SegmentedControl from "./controls/SegmentedControl.jsx";
+import { computeCorpusStats } from "../model/data.js";
 
 function SectionLabel({ text }) {
   return (
@@ -32,6 +34,8 @@ export default function SettingsPanel({
   useLRSchedule, onUseLRScheduleChange,
   warmupSteps, onWarmupStepsChange,
   totalSteps, onTotalStepsChange,
+  corpusPreset, onCorpusChange,
+  sentences,
   sentencesInput, onSentencesInputChange,
   onApplySentences,
   weightDecay, onWeightDecayChange,
@@ -42,6 +46,7 @@ export default function SettingsPanel({
   paramCount,
   onClose,
 }) {
+  const corpusStats = useMemo(() => computeCorpusStats(sentences), [sentences]);
   const embedDimOptions = [8, 16, 32];
   const numHeadsOptions = [1, 2, 4].filter((h) => config.embedDim % h === 0);
   const numBlocksOptions = [1, 2, 3, 4];
@@ -126,9 +131,9 @@ export default function SettingsPanel({
           <input
             type="number"
             min={4}
-            max={20}
+            max={32}
             value={config.seqLen}
-            onChange={(e) => onConfigChange({ ...config, seqLen: Math.max(4, Math.min(20, Number(e.target.value))) })}
+            onChange={(e) => onConfigChange({ ...config, seqLen: Math.max(4, Math.min(32, Number(e.target.value))) })}
             style={{
               width: "100%",
               background: "rgba(255,255,255,0.06)",
@@ -302,44 +307,84 @@ export default function SettingsPanel({
           </>
         )}
 
-        <SectionLabel text="Training Sentences" />
+        <SectionLabel text="Training Corpus" />
 
-        <textarea
-          value={sentencesInput}
-          onChange={(e) => onSentencesInputChange(e.target.value)}
-          style={{
-            width: "100%",
-            height: 180,
-            background: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 8,
-            color: "#e2e8f0",
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 11,
-            padding: 12,
-            resize: "vertical",
-            lineHeight: 1.6,
-          }}
-          placeholder="Enter sentences, one per line..."
-        />
-        <button
-          onClick={onApplySentences}
-          style={{
-            width: "100%",
-            marginTop: 8,
-            background: "linear-gradient(135deg, #3b82f6, #6366f1)",
-            color: "white",
-            border: "none",
-            borderRadius: 8,
-            padding: "10px 0",
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          Apply Sentences & Reset Model
-        </button>
+        <SettingRow label="Corpus">
+          <select
+            value={corpusPreset}
+            onChange={(e) => onCorpusChange(e.target.value)}
+            style={{
+              width: "100%",
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 6,
+              color: "#e2e8f0",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 12,
+              padding: "8px 10px",
+              cursor: "pointer",
+            }}
+          >
+            <option value="simple" style={{ background: "#1e293b" }}>Simple (6 sentences)</option>
+            <option value="stories" style={{ background: "#1e293b" }}>Stories (100 sentences)</option>
+            <option value="custom" style={{ background: "#1e293b" }}>Custom</option>
+          </select>
+        </SettingRow>
+
+        <div style={{
+          padding: 10, borderRadius: 8,
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          fontSize: 11, color: "#94a3b8",
+          lineHeight: 1.8,
+          marginBottom: 12,
+        }}>
+          <div><span style={{ color: "#64748b" }}>Sentences:</span> {corpusStats.sentenceCount}</div>
+          <div><span style={{ color: "#64748b" }}>Total words:</span> {corpusStats.totalWords.toLocaleString()}</div>
+          <div><span style={{ color: "#64748b" }}>Unique words:</span> {corpusStats.uniqueWords}</div>
+          <div><span style={{ color: "#64748b" }}>Avg length:</span> {corpusStats.avgLength} words/sentence</div>
+        </div>
+
+        {corpusPreset === "custom" && (
+          <>
+            <textarea
+              value={sentencesInput}
+              onChange={(e) => onSentencesInputChange(e.target.value)}
+              style={{
+                width: "100%",
+                height: 180,
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: 8,
+                color: "#e2e8f0",
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 11,
+                padding: 12,
+                resize: "vertical",
+                lineHeight: 1.6,
+              }}
+              placeholder="Enter sentences, one per line..."
+            />
+            <button
+              onClick={onApplySentences}
+              style={{
+                width: "100%",
+                marginTop: 8,
+                background: "linear-gradient(135deg, #3b82f6, #6366f1)",
+                color: "white",
+                border: "none",
+                borderRadius: 8,
+                padding: "10px 0",
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Apply Sentences & Reset Model
+            </button>
+          </>
+        )}
 
         <SectionLabel text="Checkpoints" />
 

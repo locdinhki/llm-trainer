@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { softmax } from "./model/math.js";
 import { createTinyTransformer, forward, countParameters } from "./model/transformer.js";
 import { trainStepMiniBatch, createAdamState, getLearningRate, verifyGradients } from "./model/training.js";
-import { DEFAULT_SENTENCES, buildVocabulary, makeTrainingData, generatePrompts } from "./model/data.js";
+import { DEFAULT_SENTENCES, buildWordTokenizer, buildBPETokenizer, CATEGORY_COLORS, makeTrainingData, generatePrompts } from "./model/data.js";
 import { saveCheckpoint, loadCheckpoint } from "./model/checkpoint.js";
 
 import PredictionPanel from "./components/PredictionPanel.jsx";
@@ -29,6 +29,10 @@ export default function App() {
   const [warmupSteps, setWarmupSteps] = useState(100);
   const [totalSteps, setTotalSteps] = useState(5000);
   const [weightDecay, setWeightDecay] = useState(0.01);
+
+  // Tokenizer
+  const [tokenizerMode, setTokenizerMode] = useState("word"); // "word" | "bpe"
+  const [bpeVocabSize, setBpeVocabSize] = useState(200);
 
   // Sentences
   const [sentences, setSentences] = useState(DEFAULT_SENTENCES);
@@ -78,12 +82,20 @@ export default function App() {
   const weightDecayRef = useRef(0.01);
 
   // Derived data
-  const vocab = useMemo(() => buildVocabulary(sentences), [sentences]);
-  const { word2id, id2word, vocabSize, wordCategories } = vocab;
+  const tokenizer = useMemo(
+    () => tokenizerMode === "bpe"
+      ? buildBPETokenizer(sentences, bpeVocabSize)
+      : buildWordTokenizer(sentences),
+    [sentences, tokenizerMode, bpeVocabSize]
+  );
+  const { vocabSize, id2token, token2id, tokenCategories, mergeCount } = tokenizer;
+  // Backward-compat aliases used throughout the component
+  const id2word = id2token;
+  const wordCategories = tokenCategories;
 
   const prompts = useMemo(
-    () => generatePrompts(sentences, word2id),
-    [sentences, word2id]
+    () => generatePrompts(sentences, tokenizer),
+    [sentences, tokenizer]
   );
 
   const activeConfig = useMemo(() => ({
@@ -103,13 +115,13 @@ export default function App() {
   }, []);
 
   // Initialize / reinitialize model when config or sentences change
-  const configKey = JSON.stringify(activeConfig) + JSON.stringify(sentences);
+  const configKey = JSON.stringify(activeConfig) + JSON.stringify(sentences) + tokenizerMode + bpeVocabSize;
   useEffect(() => {
     setIsPlaying(false);
     playingRef.current = false;
     paramsRef.current = createTinyTransformer(activeConfig);
     adamStateRef.current = createAdamState(paramsRef.current, activeConfig);
-    trainingData.current = makeTrainingData(sentences, word2id);
+    trainingData.current = makeTrainingData(sentences, tokenizer);
     const count = countParameters(paramsRef.current);
     setParamCount(count);
     setStep(0);
@@ -122,7 +134,8 @@ export default function App() {
     setProbs(Array(vocabSize).fill(1 / vocabSize));
     setSelectedPrompt((prev) => Math.min(prev, Math.max(0, prompts.length - 1)));
 
-    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${vocabSize} vocab | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads | AdamW`, "config");
+    const tokLabel = tokenizerMode === "bpe" ? `BPE(${vocabSize})` : `word(${vocabSize})`;
+    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${tokLabel} | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads | AdamW`, "config");
 
     // Verify gradients in development
     if (import.meta.env.DEV && trainingData.current.length > 0) {
@@ -382,7 +395,7 @@ export default function App() {
     playingRef.current = false;
     paramsRef.current = createTinyTransformer(activeConfig);
     adamStateRef.current = createAdamState(paramsRef.current, activeConfig);
-    trainingData.current = makeTrainingData(sentences, word2id);
+    trainingData.current = makeTrainingData(sentences, tokenizer);
     setParamCount(countParameters(paramsRef.current));
     setStep(0);
     stepRef.current = 0;
@@ -508,6 +521,11 @@ export default function App() {
           onApplySentences={handleApplySentences}
           weightDecay={weightDecay}
           onWeightDecayChange={setWeightDecay}
+          tokenizerMode={tokenizerMode}
+          onTokenizerModeChange={setTokenizerMode}
+          bpeVocabSize={bpeVocabSize}
+          onBpeVocabSizeChange={setBpeVocabSize}
+          tokenizer={tokenizer}
           onSaveCheckpoint={handleSaveCheckpoint}
           onLoadCheckpoint={handleLoadCheckpoint}
           paramCount={paramCount}
@@ -534,7 +552,7 @@ export default function App() {
             fontSize: 12,
             color: "#475569",
           }}>
-            {vocabSize} words · {activeConfig.embedDim}d · {activeConfig.numHeads} heads · {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""} · {paramCount.toLocaleString()} params · {useAdam ? "AdamW" : "SGD"} lr={learningRate} · batch={batchSize}
+            {vocabSize} {tokenizerMode === "bpe" ? "BPE tokens" : "words"} · {activeConfig.embedDim}d · {activeConfig.numHeads} heads · {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""} · {paramCount.toLocaleString()} params · {useAdam ? "AdamW" : "SGD"} lr={learningRate} · batch={batchSize}
           </p>
         </div>
 

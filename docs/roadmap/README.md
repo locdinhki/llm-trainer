@@ -32,7 +32,7 @@ Transform the tiny educational transformer (~3K params, 11 words) into a near-pr
 | 2 | [Architecture Modernization](archive/phase-2-architecture/) | RoPE, RMSNorm, SiLU, SwiGLU, KV cache | Done |
 | 3 | [Mini-Batch + Adam](archive/phase-3-optimizer/) | Mini-batch SGD, Adam optimizer, LR schedule | Done |
 | 4 | [Training Observability](archive/phase-4-observability/) | AdamW, gradient norms, perplexity, LR curves, checkpoints | Done |
-| 5 | [BPE Tokenizer](phase-5-bpe/) | Byte-Pair Encoding from scratch | Pending |
+| 5 | [BPE Tokenizer](archive/phase-5-bpe/) | Byte-Pair Encoding from scratch | Done |
 | 6 | [Expanded Corpus](phase-6-corpus/) | ~150 curated sentences with preset selector | Pending |
 | 7 | [Model Scaling + Worker](phase-7-scaling/) | Expanded config, Web Worker integration | Pending |
 | 8 | [Interactive Generation](phase-8-generation/) | Text generation panel with temperature/top-k/top-p | Pending |

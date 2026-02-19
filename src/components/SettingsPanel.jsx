@@ -35,6 +35,9 @@ export default function SettingsPanel({
   sentencesInput, onSentencesInputChange,
   onApplySentences,
   weightDecay, onWeightDecayChange,
+  tokenizerMode, onTokenizerModeChange,
+  bpeVocabSize, onBpeVocabSizeChange,
+  tokenizer,
   onSaveCheckpoint, onLoadCheckpoint,
   paramCount,
   onClose,
@@ -138,6 +141,51 @@ export default function SettingsPanel({
             }}
           />
         </SettingRow>
+
+        <SectionLabel text="Tokenization" />
+
+        <SettingRow label="Mode">
+          <SegmentedControl
+            options={["Word-level", "BPE"]}
+            value={tokenizerMode === "bpe" ? "BPE" : "Word-level"}
+            onChange={(v) => onTokenizerModeChange(v === "BPE" ? "bpe" : "word")}
+          />
+        </SettingRow>
+
+        {tokenizerMode === "bpe" && (
+          <SettingRow label={`BPE Vocab Size: ${bpeVocabSize}`}>
+            <input
+              type="range"
+              min={50}
+              max={500}
+              step={10}
+              value={bpeVocabSize}
+              onChange={(e) => onBpeVocabSizeChange(Number(e.target.value))}
+              style={{ width: "100%", accentColor: "#c084fc" }}
+            />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
+              <span>50</span><span>500</span>
+            </div>
+          </SettingRow>
+        )}
+
+        <div style={{
+          padding: 10, borderRadius: 8,
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          fontSize: 11, color: "#94a3b8",
+          lineHeight: 1.6,
+        }}>
+          <div><span style={{ color: "#64748b" }}>Vocab size:</span> {tokenizer.vocabSize} tokens</div>
+          {tokenizerMode === "bpe" && (
+            <div><span style={{ color: "#64748b" }}>Merges:</span> {tokenizer.mergeCount}</div>
+          )}
+          <div style={{ marginTop: 6, fontSize: 10, color: "#64748b" }}>
+            {tokenizerMode === "bpe"
+              ? "Subword tokens — can represent any text"
+              : "Whole-word tokens — limited to known vocabulary"}
+          </div>
+        </div>
 
         <SectionLabel text="Training" />
 
@@ -338,7 +386,7 @@ export default function SettingsPanel({
         </div>
 
         <div style={{ marginTop: 12, fontSize: 10, color: "#f97316", opacity: 0.7 }}>
-          Changing architecture or sentences resets training progress.
+          Changing architecture, tokenizer, or sentences resets training progress.
         </div>
       </div>
     </>

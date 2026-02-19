@@ -229,17 +229,17 @@ export default function App() {
     setStep(stepRef.current);
     setLossHistory((h) => {
       const next = [...h, loss];
-      if (next.length > 500) return next.slice(-500);
+      if (next.length > 2000) return next.slice(-2000);
       return next;
     });
     setGradNormHistory((h) => {
       const next = [...h, gradNorm];
-      if (next.length > 500) return next.slice(-500);
+      if (next.length > 2000) return next.slice(-2000);
       return next;
     });
     setLrHistory((h) => {
       const next = [...h, lr];
-      if (next.length > 500) return next.slice(-500);
+      if (next.length > 2000) return next.slice(-2000);
       return next;
     });
     updateVisualization(paramsRef.current, selectedPromptRef.current);
@@ -445,7 +445,7 @@ export default function App() {
         lossBufferRef.current = [];
         setLossHistory((h) => {
           const next = h.concat(newLosses);
-          if (next.length > 500) return next.slice(-500);
+          if (next.length > 2000) return next.slice(-2000);
           return next;
         });
         setStep(stepRef.current);
@@ -457,7 +457,7 @@ export default function App() {
         gradNormBufferRef.current = [];
         setGradNormHistory((h) => {
           const next = h.concat(newNorms);
-          if (next.length > 500) return next.slice(-500);
+          if (next.length > 2000) return next.slice(-2000);
           return next;
         });
       }
@@ -468,7 +468,7 @@ export default function App() {
         lrBufferRef.current = [];
         setLrHistory((h) => {
           const next = h.concat(newLRs);
-          if (next.length > 500) return next.slice(-500);
+          if (next.length > 2000) return next.slice(-2000);
           return next;
         });
       }
@@ -922,7 +922,14 @@ export default function App() {
             numBlocks={activeConfig.numBlocks}
             maxSpeed={maxSpeed}
           />
-          <LossPanel lossHistory={lossHistory} vocabSize={vocabSize} />
+          <LossPanel
+            lossHistory={lossHistory}
+            vocabSize={vocabSize}
+            lrHistory={lrHistory}
+            useLRSchedule={useLRSchedule}
+            trainingDataSize={trainingData.current.length}
+            batchSize={batchSize}
+          />
           <MetricsPanel
             lossHistory={lossHistory}
             gradNormHistory={gradNormHistory}

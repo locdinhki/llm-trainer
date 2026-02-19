@@ -36,7 +36,7 @@ Transform the tiny educational transformer (~3K params, 11 words) into a near-pr
 | 6 | [Expanded Corpus](archive/phase-6-corpus/) | ~150 curated sentences with preset selector | Done |
 | 7 | [Model Scaling + Worker](archive/phase-7-scaling/) | Expanded config, Web Worker integration | Done |
 | 8 | [Interactive Generation](archive/phase-8-generation/) | Text generation panel with temperature/top-k/top-p | Done |
-| 9 | [Visualization Adaptations](phase-9-visualization/) | Adapt all panels for larger vocab/sequences | Pending |
+| 9 | [Visualization Adaptations](archive/phase-9-visualization/) | Adapt all panels for larger vocab/sequences | Done |
 
 ## Implementation Order
 

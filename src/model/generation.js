@@ -154,3 +154,109 @@ export function generate(params, promptTokens, config, maxNewTokens, temperature
 
   return tokens;
 }
+
+// Sample a single token from logits with temperature, top-k, and top-p filtering.
+// Returns { tokenId, probability } where probability is the post-temperature softmax value.
+export function sampleToken(logits, temperature, topK, topP) {
+  const n = logits.length;
+
+  // Temperature scaling
+  const scaled = new Float32Array(n);
+  for (let i = 0; i < n; i++) scaled[i] = logits[i] / temperature;
+
+  // Softmax
+  const probs = softmax(scaled);
+
+  // Build indexed pairs and sort descending by probability
+  const indexed = new Array(n);
+  for (let i = 0; i < n; i++) indexed[i] = { id: i, prob: probs[i] };
+  indexed.sort((a, b) => b.prob - a.prob);
+
+  // Top-k: keep only the top-k entries
+  const topKFiltered = indexed.slice(0, topK);
+
+  // Top-p (nucleus): accumulate until sum >= topP
+  let cumSum = 0;
+  let nucleusEnd = 0;
+  for (let i = 0; i < topKFiltered.length; i++) {
+    cumSum += topKFiltered[i].prob;
+    nucleusEnd = i + 1;
+    if (cumSum >= topP) break;
+  }
+  const candidates = topKFiltered.slice(0, nucleusEnd);
+
+  // Renormalize
+  let total = 0;
+  for (const c of candidates) total += c.prob;
+  for (const c of candidates) c.prob /= total;
+
+  // Sample from the filtered distribution
+  let r = Math.random();
+  let chosen = candidates[candidates.length - 1];
+  for (const c of candidates) {
+    r -= c.prob;
+    if (r <= 0) { chosen = c; break; }
+  }
+
+  return { tokenId: chosen.id, probability: probs[chosen.id] };
+}
+
+// Streaming autoregressive generation using KV cache.
+// Async generator that yields tokens one at a time for visual drip-feed.
+// Yields { type: "prompt", tokens } then { type: "generated", token } per step.
+export async function* generateStream(
+  params, config, tokenizer, inputText,
+  maxTokens, temperature, topK, topP, signal
+) {
+  const promptTokens = tokenizer.encode(inputText);
+  if (promptTokens.length === 0) return;
+
+  const kvCache = createKVCache(config);
+
+  // Prefill: run forward for all prompt tokens to populate KV cache
+  let logits;
+  for (let i = 0; i < promptTokens.length; i++) {
+    ({ logits } = forwardWithKVCache(params, promptTokens[i], i, kvCache, config));
+  }
+
+  // Yield prompt tokens (probability = 1.0 since they are user-provided)
+  yield {
+    type: "prompt",
+    tokens: promptTokens.map((id) => ({
+      id,
+      text: tokenizer.id2token[id],
+      probability: 1.0,
+    })),
+  };
+
+  // Autoregressive generation loop
+  for (let step = 0; step < maxTokens; step++) {
+    if (signal && signal.aborted) return;
+
+    const { tokenId, probability } = sampleToken(logits, temperature, topK, topP);
+
+    yield {
+      type: "generated",
+      token: {
+        id: tokenId,
+        text: tokenizer.id2token[tokenId],
+        probability,
+      },
+    };
+
+    // Early stopping: if the model is too uncertain
+    const fullProbs = softmax(logits);
+    let maxProb = 0;
+    for (let i = 0; i < fullProbs.length; i++) {
+      if (fullProbs[i] > maxProb) maxProb = fullProbs[i];
+    }
+    if (maxProb < 0.05) return;
+
+    // Forward the new token through the cache
+    const position = promptTokens.length + step;
+    ({ logits } = forwardWithKVCache(params, tokenId, position, kvCache, config));
+
+    // Delay for visual effect
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}

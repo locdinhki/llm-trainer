@@ -12,6 +12,7 @@ import AttentionPanel from "./components/AttentionPanel.jsx";
 import LossPanel from "./components/LossPanel.jsx";
 import MetricsPanel from "./components/MetricsPanel.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
+import GenerationPanel from "./components/GenerationPanel.jsx";
 import TrainingLog from "./components/TrainingLog.jsx";
 
 export default function App() {
@@ -932,6 +933,12 @@ export default function App() {
             totalSteps={totalSteps}
             baseLR={learningRate}
             useLRSchedule={useLRSchedule}
+          />
+          <GenerationPanel
+            paramsRef={paramsRef}
+            config={activeConfig}
+            tokenizer={tokenizer}
+            isTraining={isPlaying}
           />
           <TrainingLog logs={logs} />
         </div>

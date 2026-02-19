@@ -1,4 +1,4 @@
-# 7B: Sampling Utilities
+# 8B: Sampling Utilities
 
 ## File: `src/model/generation.js`
 
@@ -6,19 +6,20 @@ This file also contains the KV cache code from Phase 2E.
 
 ## Functions
 
-### `sampleToken(probs, temperature, topK)`
+### `sampleToken(probs, temperature, topK, topP)`
 ```js
 1. Apply temperature: logits[i] /= temperature (before softmax)
    - Or equivalently: probs[i]^(1/temperature), then renormalize
 2. Sort by probability, keep only top-k
-3. Renormalize top-k probabilities to sum to 1
-4. Sample from the distribution:
+3. Apply top-p (nucleus): sort by probability descending, accumulate until sum >= p, discard rest
+4. Renormalize remaining probabilities
+5. Sample from the distribution:
    - Generate random number r in [0, 1)
    - Walk through cumulative probabilities until cumSum > r
-5. Return { tokenId, probability }
+6. Return { tokenId, probability }
 ```
 
-### `generate(params, config, tokenizer, inputText, maxTokens, temperature, topK)`
+### `generate(params, config, tokenizer, inputText, maxTokens, temperature, topK, topP)`
 ```js
 1. Encode input text: tokens = tokenizer.encode(inputText)
 2. Create KV cache: cache = createKVCache(config)
@@ -26,7 +27,7 @@ This file also contains the KV cache code from Phase 2E.
 4. For i = 0 to maxTokens:
    a. Forward pass for last token (using KV cache)
    b. Get logits, apply softmax
-   c. Sample next token: sampleToken(probs, temperature, topK)
+   c. Sample next token: sampleToken(probs, temperature, topK, topP)
    d. Append token to sequence
    e. Yield { token, probability, sequence } (for streaming display)
    f. Stop if maxProb < 0.05 (model is too uncertain)
@@ -49,3 +50,11 @@ This file also contains the KV cache code from Phase 2E.
 | 5 | Choose from top 5 candidates |
 | 10 | More variety |
 | vocabSize | No filtering (pure temperature sampling) |
+
+### Top-P Intuition
+| Top-P | Behavior |
+|-------|----------|
+| 0.1 | Very conservative (only top ~1-2 tokens) |
+| 0.5 | Moderate filtering |
+| 0.9 | Standard nucleus sampling |
+| 1.0 | No filtering (pure temperature + top-k) |

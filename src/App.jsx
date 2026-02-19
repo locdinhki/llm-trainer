@@ -3,11 +3,13 @@ import { softmax } from "./model/math.js";
 import { createTinyTransformer, forward, countParameters } from "./model/transformer.js";
 import { trainStepMiniBatch, createAdamState, getLearningRate, verifyGradients } from "./model/training.js";
 import { DEFAULT_SENTENCES, buildVocabulary, makeTrainingData, generatePrompts } from "./model/data.js";
+import { saveCheckpoint, loadCheckpoint } from "./model/checkpoint.js";
 
 import PredictionPanel from "./components/PredictionPanel.jsx";
 import EmbeddingPanel from "./components/EmbeddingPanel.jsx";
 import AttentionPanel from "./components/AttentionPanel.jsx";
 import LossPanel from "./components/LossPanel.jsx";
+import MetricsPanel from "./components/MetricsPanel.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
 import TrainingLog from "./components/TrainingLog.jsx";
 
@@ -26,6 +28,7 @@ export default function App() {
   const [useLRSchedule, setUseLRSchedule] = useState(true);
   const [warmupSteps, setWarmupSteps] = useState(100);
   const [totalSteps, setTotalSteps] = useState(5000);
+  const [weightDecay, setWeightDecay] = useState(0.01);
 
   // Sentences
   const [sentences, setSentences] = useState(DEFAULT_SENTENCES);
@@ -35,6 +38,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [step, setStep] = useState(0);
   const [lossHistory, setLossHistory] = useState([]);
+  const [gradNormHistory, setGradNormHistory] = useState([]);
+  const [lrHistory, setLrHistory] = useState([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [maxSpeed, setMaxSpeed] = useState(false);
@@ -54,6 +59,8 @@ export default function App() {
   const trainingData = useRef([]);
   const stepRef = useRef(0);
   const lossBufferRef = useRef([]);       // Buffer losses between render frames
+  const gradNormBufferRef = useRef([]);   // Buffer gradient norms between render frames
+  const lrBufferRef = useRef([]);         // Buffer learning rates between render frames
   const vizDirtyRef = useRef(false);      // Flag: training happened since last render
   const selectedPromptRef = useRef(0);
   const maxSpeedRef = useRef(false);
@@ -68,6 +75,7 @@ export default function App() {
   const useLRScheduleRef = useRef(true);
   const warmupStepsRef = useRef(100);
   const totalStepsRef = useRef(5000);
+  const weightDecayRef = useRef(0.01);
 
   // Derived data
   const vocab = useMemo(() => buildVocabulary(sentences), [sentences]);
@@ -107,12 +115,14 @@ export default function App() {
     setStep(0);
     stepRef.current = 0;
     setLossHistory([]);
+    setGradNormHistory([]);
+    setLrHistory([]);
     setAttnWeights([]);
     setEmbeddingSnapshot([]);
     setProbs(Array(vocabSize).fill(1 / vocabSize));
     setSelectedPrompt((prev) => Math.min(prev, Math.max(0, prompts.length - 1)));
 
-    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${vocabSize} vocab | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads | Adam`, "config");
+    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${vocabSize} vocab | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads | AdamW`, "config");
 
     // Verify gradients in development
     if (import.meta.env.DEV && trainingData.current.length > 0) {
@@ -143,6 +153,7 @@ export default function App() {
   useLRScheduleRef.current = useLRSchedule;
   warmupStepsRef.current = warmupSteps;
   totalStepsRef.current = totalSteps;
+  weightDecayRef.current = weightDecay;
 
   // Update visualization (used for manual step & prompt changes)
   const updateVisualization = useCallback(
@@ -168,11 +179,22 @@ export default function App() {
       ? getLearningRate(stepRef.current, warmupStepsRef.current, totalStepsRef.current, baseLR)
       : baseLR;
     const adam = useAdamRef.current ? adamStateRef.current : null;
-    const loss = trainStepMiniBatch(paramsRef.current, trainingData.current, cfg, lr, batchSizeRef.current, adam);
+    const wd = useAdamRef.current ? weightDecayRef.current : 0;
+    const { loss, gradNorm } = trainStepMiniBatch(paramsRef.current, trainingData.current, cfg, lr, batchSizeRef.current, adam, wd);
     stepRef.current += 1;
     setStep(stepRef.current);
     setLossHistory((h) => {
       const next = [...h, loss];
+      if (next.length > 500) return next.slice(-500);
+      return next;
+    });
+    setGradNormHistory((h) => {
+      const next = [...h, gradNorm];
+      if (next.length > 500) return next.slice(-500);
+      return next;
+    });
+    setLrHistory((h) => {
+      const next = [...h, lr];
       if (next.length > 500) return next.slice(-500);
       return next;
     });
@@ -201,6 +223,8 @@ export default function App() {
 
     let mounted = true;
     lossBufferRef.current = [];
+    gradNormBufferRef.current = [];
+    lrBufferRef.current = [];
     logBufferRef.current = [];
     vizDirtyRef.current = false;
 
@@ -218,9 +242,12 @@ export default function App() {
           ? getLearningRate(stepRef.current, warmupStepsRef.current, totalStepsRef.current, baseLR)
           : baseLR;
         const adam = useAdamRef.current ? adamStateRef.current : null;
-        const loss = trainStepMiniBatch(params, trainingData.current, cfg, lr, batchSizeRef.current, adam);
+        const wd = useAdamRef.current ? weightDecayRef.current : 0;
+        const { loss, gradNorm } = trainStepMiniBatch(params, trainingData.current, cfg, lr, batchSizeRef.current, adam, wd);
         stepRef.current += 1;
         lossBufferRef.current.push(loss);
+        gradNormBufferRef.current.push(gradNorm);
+        lrBufferRef.current.push(lr);
         vizDirtyRef.current = true;
 
         // Buffer log entries (every 20th step in maxSpeed, every step otherwise)
@@ -290,6 +317,28 @@ export default function App() {
         setStep(stepRef.current);
       }
 
+      // Flush gradient norm buffer
+      if (gradNormBufferRef.current.length > 0) {
+        const newNorms = gradNormBufferRef.current;
+        gradNormBufferRef.current = [];
+        setGradNormHistory((h) => {
+          const next = h.concat(newNorms);
+          if (next.length > 500) return next.slice(-500);
+          return next;
+        });
+      }
+
+      // Flush LR buffer
+      if (lrBufferRef.current.length > 0) {
+        const newLRs = lrBufferRef.current;
+        lrBufferRef.current = [];
+        setLrHistory((h) => {
+          const next = h.concat(newLRs);
+          if (next.length > 500) return next.slice(-500);
+          return next;
+        });
+      }
+
       // Flush log buffer
       if (logBufferRef.current.length > 0) {
         const newLogs = logBufferRef.current;
@@ -338,6 +387,8 @@ export default function App() {
     setStep(0);
     stepRef.current = 0;
     setLossHistory([]);
+    setGradNormHistory([]);
+    setLrHistory([]);
     setSelectedPrompt(0);
     if (prompts.length > 0) {
       updateVisualization(paramsRef.current, 0);
@@ -366,6 +417,57 @@ export default function App() {
     setShowSettings(false);
     addLog(`[Config] Applied ${lines.length} sentences`, "config");
   };
+
+  // Checkpoint save/load
+  const handleSaveCheckpoint = useCallback(() => {
+    const json = saveCheckpoint(
+      paramsRef.current, adamStateRef.current, stepRef.current,
+      activeConfigRef.current, lossHistory
+    );
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `checkpoint-step-${stepRef.current}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    addLog(`[Checkpoint] Saved at step ${stepRef.current}`, "config");
+  }, [lossHistory, addLog]);
+
+  const handleLoadCheckpoint = useCallback(() => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const checkpoint = loadCheckpoint(ev.target.result);
+          if (checkpoint.config.vocabSize !== activeConfigRef.current.vocabSize) {
+            addLog("[Checkpoint] Error: vocab size mismatch", "warning");
+            return;
+          }
+          setIsPlaying(false);
+          playingRef.current = false;
+          paramsRef.current = checkpoint.params;
+          adamStateRef.current = checkpoint.adamState;
+          stepRef.current = checkpoint.step;
+          setStep(checkpoint.step);
+          setLossHistory(checkpoint.lossHistory);
+          setGradNormHistory([]);
+          setLrHistory([]);
+          updateVisualization(paramsRef.current, selectedPromptRef.current);
+          addLog(`[Checkpoint] Loaded at step ${checkpoint.step}`, "config");
+        } catch (err) {
+          addLog(`[Checkpoint] Load failed: ${err.message}`, "warning");
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }, [addLog, updateVisualization]);
 
   // Current prediction info
   const currentPrompt = prompts[selectedPrompt] || prompts[0] || { tokens: [], label: "", target: "" };
@@ -404,6 +506,10 @@ export default function App() {
           sentencesInput={sentencesInput}
           onSentencesInputChange={setSentencesInput}
           onApplySentences={handleApplySentences}
+          weightDecay={weightDecay}
+          onWeightDecayChange={setWeightDecay}
+          onSaveCheckpoint={handleSaveCheckpoint}
+          onLoadCheckpoint={handleLoadCheckpoint}
           paramCount={paramCount}
           onClose={() => setShowSettings(false)}
         />
@@ -428,7 +534,7 @@ export default function App() {
             fontSize: 12,
             color: "#475569",
           }}>
-            {vocabSize} words · {activeConfig.embedDim}d · {activeConfig.numHeads} heads · {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""} · {paramCount.toLocaleString()} params · {useAdam ? "Adam" : "SGD"} lr={learningRate} · batch={batchSize}
+            {vocabSize} words · {activeConfig.embedDim}d · {activeConfig.numHeads} heads · {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""} · {paramCount.toLocaleString()} params · {useAdam ? "AdamW" : "SGD"} lr={learningRate} · batch={batchSize}
           </p>
         </div>
 
@@ -638,6 +744,17 @@ export default function App() {
             maxSpeed={maxSpeed}
           />
           <LossPanel lossHistory={lossHistory} vocabSize={vocabSize} />
+          <MetricsPanel
+            lossHistory={lossHistory}
+            gradNormHistory={gradNormHistory}
+            lrHistory={lrHistory}
+            vocabSize={vocabSize}
+            currentStep={step}
+            warmupSteps={warmupSteps}
+            totalSteps={totalSteps}
+            baseLR={learningRate}
+            useLRSchedule={useLRSchedule}
+          />
           <TrainingLog logs={logs} />
         </div>
 

@@ -34,6 +34,8 @@ export default function SettingsPanel({
   totalSteps, onTotalStepsChange,
   sentencesInput, onSentencesInputChange,
   onApplySentences,
+  weightDecay, onWeightDecayChange,
+  onSaveCheckpoint, onLoadCheckpoint,
   paramCount,
   onClose,
 }) {
@@ -156,15 +158,32 @@ export default function SettingsPanel({
 
         <SettingRow label="Optimizer">
           <SegmentedControl
-            options={["Adam", "SGD"]}
-            value={useAdam ? "Adam" : "SGD"}
+            options={["AdamW", "SGD"]}
+            value={useAdam ? "AdamW" : "SGD"}
             onChange={(v) => {
-              onUseAdamChange(v === "Adam");
-              if (v === "Adam" && learningRate > 0.01) onLearningRateChange(0.001);
+              onUseAdamChange(v === "AdamW");
+              if (v === "AdamW" && learningRate > 0.01) onLearningRateChange(0.001);
               if (v === "SGD" && learningRate < 0.005) onLearningRateChange(0.01);
             }}
           />
         </SettingRow>
+
+        {useAdam && (
+          <SettingRow label={`Weight Decay: ${weightDecay.toFixed(3)}`}>
+            <input
+              type="range"
+              min={0}
+              max={0.1}
+              step={0.001}
+              value={weightDecay}
+              onChange={(e) => onWeightDecayChange(Number(e.target.value))}
+              style={{ width: "100%", accentColor: "#6366f1" }}
+            />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
+              <span>0</span><span>0.1</span>
+            </div>
+          </SettingRow>
+        )}
 
         <SettingRow label={`Batch Size: ${batchSize}`}>
           <SegmentedControl
@@ -273,6 +292,45 @@ export default function SettingsPanel({
         >
           Apply Sentences & Reset Model
         </button>
+
+        <SectionLabel text="Checkpoints" />
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={onSaveCheckpoint}
+            style={{
+              flex: 1,
+              background: "linear-gradient(135deg, #3b82f6, #6366f1)",
+              color: "white",
+              border: "none",
+              borderRadius: 8,
+              padding: "10px 0",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Save
+          </button>
+          <button
+            onClick={onLoadCheckpoint}
+            style={{
+              flex: 1,
+              background: "rgba(255,255,255,0.06)",
+              color: "#94a3b8",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 8,
+              padding: "10px 0",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Load
+          </button>
+        </div>
 
         <div style={{ marginTop: 20, padding: 12, background: "rgba(255,255,255,0.03)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)" }}>
           <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>Model Parameters</div>

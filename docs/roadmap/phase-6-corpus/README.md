@@ -1,4 +1,4 @@
-# Phase 5: Expanded Corpus
+# Phase 6: Expanded Corpus
 
 ## Goal
 Provide ~150 curated training sentences as preset corpora, giving the model enough data to learn interesting patterns while keeping training interactive.
@@ -6,14 +6,14 @@ Provide ~150 curated training sentences as preset corpora, giving the model enou
 ## Why Expand?
 - Current 6 sentences only teach ~11 words — very limited generation capability
 - 150 sentences with ~200 unique words enables basic grammatical patterns (subject-verb-object, articles before nouns) and topical coherence
-- BPE tokenizer (Phase 4) needs more diverse text to produce meaningful subword merges
+- BPE tokenizer (Phase 5) needs more diverse text to produce meaningful subword merges
 
 ## Subphases
 
 | # | Subphase | Description |
 |---|----------|-------------|
-| 5A | [Preset Corpora](5a-preset-corpora/) | Curated sentence collections |
-| 5B | [Corpus Selector](5b-corpus-selector/) | UI dropdown + stats display |
+| 6A | [Preset Corpora](6a-preset-corpora/) | Curated sentence collections |
+| 6B | [Corpus Selector](6b-corpus-selector/) | UI dropdown + stats display |
 
 ## Files
 - `src/model/data.js`

@@ -112,9 +112,43 @@ export function trainStepBackprop(params, trainingData, config, lr) {
   return totalLoss;
 }
 
-// --- 3A: Mini-batch training ---
+// --- Gradient norm computation ---
 
-export function trainStepMiniBatch(params, trainingData, config, lr, batchSize, adamState) {
+function computeGradNorm(grads) {
+  let sumSq = 0;
+  for (const key of ["embedding", "Wout"]) {
+    const arr = grads[key];
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = 0; j < arr[i].length; j++) {
+        sumSq += arr[i][j] * arr[i][j];
+      }
+    }
+  }
+  for (let i = 0; i < grads.bout.length; i++) {
+    sumSq += grads.bout[i] * grads.bout[i];
+  }
+  for (const gBlock of grads.blocks) {
+    for (const key of Object.keys(gBlock)) {
+      const arr = gBlock[key];
+      if (arr[0]?.length !== undefined) {
+        for (let i = 0; i < arr.length; i++) {
+          for (let j = 0; j < arr[i].length; j++) {
+            sumSq += arr[i][j] * arr[i][j];
+          }
+        }
+      } else {
+        for (let i = 0; i < arr.length; i++) {
+          sumSq += arr[i] * arr[i];
+        }
+      }
+    }
+  }
+  return Math.sqrt(sumSq);
+}
+
+// --- 4A: Mini-batch training with AdamW ---
+
+export function trainStepMiniBatch(params, trainingData, config, lr, batchSize, adamState, weightDecay = 0.01) {
   const n = trainingData.length;
   const actualBatch = Math.min(batchSize, n);
   const grads = createZeroGrads(params, config);
@@ -139,16 +173,18 @@ export function trainStepMiniBatch(params, trainingData, config, lr, batchSize, 
   totalLoss /= actualBatch;
   scaleGrads(grads, 1 / actualBatch);
 
+  const gradNorm = computeGradNorm(grads);
+
   if (adamState) {
-    adamUpdate(params, grads, adamState, lr);
+    adamUpdate(params, grads, adamState, lr, 0.9, 0.999, 1e-8, weightDecay);
   } else {
     applyGradients(params, grads, lr, 5.0);
   }
 
-  return totalLoss;
+  return { loss: totalLoss, gradNorm };
 }
 
-// --- 3B: Adam optimizer ---
+// --- 4B: AdamW optimizer (decoupled weight decay) ---
 
 export function createAdamState(params, config) {
   return {
@@ -158,24 +194,24 @@ export function createAdamState(params, config) {
   };
 }
 
-function adamUpdateArray1D(p, g, m, v, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm) {
+function adamUpdateArray1D(p, g, m, v, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm, weightDecay) {
   for (let i = 0; i < p.length; i++) {
     const gc = clipGrad(g[i], maxNorm);
     m[i] = beta1 * m[i] + (1 - beta1) * gc;
     v[i] = beta2 * v[i] + (1 - beta2) * gc * gc;
     const mHat = m[i] * mHatScale;
     const vHat = v[i] * vHatScale;
-    p[i] -= lr * mHat / (Math.sqrt(vHat) + eps);
+    p[i] -= lr * (mHat / (Math.sqrt(vHat) + eps) + weightDecay * p[i]);
   }
 }
 
-function adamUpdateArray2D(p, g, m, v, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm) {
+function adamUpdateArray2D(p, g, m, v, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm, weightDecay) {
   for (let i = 0; i < p.length; i++) {
-    adamUpdateArray1D(p[i], g[i], m[i], v[i], lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+    adamUpdateArray1D(p[i], g[i], m[i], v[i], lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm, weightDecay);
   }
 }
 
-export function adamUpdate(params, grads, state, lr, beta1 = 0.9, beta2 = 0.999, eps = 1e-8) {
+export function adamUpdate(params, grads, state, lr, beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weightDecay = 0.01) {
   state.t += 1;
   const maxNorm = 5.0;
   const mHatScale = 1 / (1 - Math.pow(beta1, state.t));
@@ -183,10 +219,10 @@ export function adamUpdate(params, grads, state, lr, beta1 = 0.9, beta2 = 0.999,
 
   // 2D params
   for (const key of ["embedding", "Wout"]) {
-    adamUpdateArray2D(params[key], grads[key], state.m[key], state.v[key], lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+    adamUpdateArray2D(params[key], grads[key], state.m[key], state.v[key], lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm, weightDecay);
   }
   // 1D params
-  adamUpdateArray1D(params.bout, grads.bout, state.m.bout, state.v.bout, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+  adamUpdateArray1D(params.bout, grads.bout, state.m.bout, state.v.bout, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm, weightDecay);
   // Per-block params
   for (let b = 0; b < params.blocks.length; b++) {
     const pBlock = params.blocks[b];
@@ -199,9 +235,9 @@ export function adamUpdate(params, grads, state, lr, beta1 = 0.9, beta2 = 0.999,
       const mB = mBlock[key];
       const vB = vBlock[key];
       if (p[0]?.length !== undefined) {
-        adamUpdateArray2D(p, g, mB, vB, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+        adamUpdateArray2D(p, g, mB, vB, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm, weightDecay);
       } else {
-        adamUpdateArray1D(p, g, mB, vB, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+        adamUpdateArray1D(p, g, mB, vB, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm, weightDecay);
       }
     }
   }

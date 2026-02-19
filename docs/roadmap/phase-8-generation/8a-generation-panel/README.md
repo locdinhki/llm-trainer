@@ -1,4 +1,4 @@
-# 7A: Generation Panel Component
+# 8A: Generation Panel Component
 
 ## New File: `src/components/GenerationPanel.jsx`
 
@@ -14,6 +14,7 @@
 |                                            |
 | Temperature: [====O=======] 1.0            |
 | Top-k:       [==O=========] 5             |
+| Top-p:       [========O===] 0.9            |
 |                                 [Clear]    |
 +-------------------------------------------+
 ```
@@ -45,6 +46,11 @@
 - **Top-k slider** (1 to vocab_size, default 5):
   - Only sample from the top-k most probable tokens
   - k=1 is greedy decoding
+- **Top-p slider** (0.1 to 1.0, default 0.9):
+  - Only sample from the smallest set of tokens whose cumulative probability exceeds p
+  - p=0.1: Very focused
+  - p=0.9: Default nucleus sampling
+  - p=1.0: No filtering
 - **Clear button**: Reset output
 
 ### Integration with App.jsx

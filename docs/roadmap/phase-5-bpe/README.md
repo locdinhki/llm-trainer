@@ -1,4 +1,4 @@
-# Phase 4: BPE Tokenizer
+# Phase 5: BPE Tokenizer
 
 ## Goal
 Implement Byte-Pair Encoding tokenization from scratch. BPE is the tokenization method used by GPT-2, GPT-3, GPT-4, LLaMA, and most modern LLMs.
@@ -23,9 +23,9 @@ Result: a mix of characters, common subwords, and frequent whole words.
 
 | # | Subphase | Description |
 |---|----------|-------------|
-| 4A | [BPE Algorithm](4a-bpe-algorithm/) | Core BPE training, encoding, and decoding |
-| 4B | [Data Integration](4b-data-integration/) | Unified tokenizer abstraction for word-level and BPE |
-| 4C | [Settings UI](4c-settings-ui/) | Toggle and config in SettingsPanel |
+| 5A | [BPE Algorithm](5a-bpe-algorithm/) | Core BPE training, encoding, and decoding |
+| 5B | [Data Integration](5b-data-integration/) | Unified tokenizer abstraction for word-level and BPE |
+| 5C | [Settings UI](5c-settings-ui/) | Toggle and config in SettingsPanel |
 
 ## Files
 - `src/model/bpe.js` (new)

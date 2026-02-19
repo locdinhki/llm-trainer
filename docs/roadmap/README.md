@@ -17,7 +17,7 @@ Transform the tiny educational transformer (~3K params, 11 words) into a near-pr
 | Batch size | all 28 pairs | mini-batch 32 |
 | Time per step | <1ms | ~30-80ms |
 | Steps to converge | ~200 | ~2,000-5,000 |
-| Optimizer | SGD | Adam |
+| Optimizer | SGD | AdamW |
 | Activation | ReLU | SiLU (configurable) |
 | Normalization | LayerNorm | RMSNorm |
 | Position encoding | Absolute learned | RoPE (rotary) |
@@ -31,11 +31,12 @@ Transform the tiny educational transformer (~3K params, 11 words) into a near-pr
 | 1 | [Float32Array Migration](archive/phase-1-float32array/) | Replace JS Arrays with typed arrays for 2-4x speedup | Done |
 | 2 | [Architecture Modernization](archive/phase-2-architecture/) | RoPE, RMSNorm, SiLU, SwiGLU, KV cache | Done |
 | 3 | [Mini-Batch + Adam](archive/phase-3-optimizer/) | Mini-batch SGD, Adam optimizer, LR schedule | Done |
-| 4 | [BPE Tokenizer](phase-4-bpe/) | Byte-Pair Encoding from scratch | Pending |
-| 5 | [Expanded Corpus](phase-5-corpus/) | ~150 curated sentences with preset selector | Pending |
-| 6 | [Model Scaling + Worker](phase-6-scaling/) | Expanded config, dropout, Web Worker integration | Pending |
-| 7 | [Interactive Generation](phase-7-generation/) | Text generation panel with temperature/top-k | Pending |
-| 8 | [Visualization Adaptations](phase-8-visualization/) | Adapt all panels for larger vocab/sequences | Pending |
+| 4 | [Training Observability](archive/phase-4-observability/) | AdamW, gradient norms, perplexity, LR curves, checkpoints | Done |
+| 5 | [BPE Tokenizer](phase-5-bpe/) | Byte-Pair Encoding from scratch | Pending |
+| 6 | [Expanded Corpus](phase-6-corpus/) | ~150 curated sentences with preset selector | Pending |
+| 7 | [Model Scaling + Worker](phase-7-scaling/) | Expanded config, Web Worker integration | Pending |
+| 8 | [Interactive Generation](phase-8-generation/) | Text generation panel with temperature/top-k/top-p | Pending |
+| 9 | [Visualization Adaptations](phase-9-visualization/) | Adapt all panels for larger vocab/sequences | Pending |
 
 ## Implementation Order
 
@@ -46,15 +47,17 @@ Phase 2 (Architecture: RoPE, RMSNorm, SiLU, SwiGLU, KV cache)
   |
 Phase 3 (Mini-batch + Adam)     <- Needs typed arrays + new architecture
   |
-Phase 4 (BPE)                   <- Needs mini-batch (too much data for full-batch)
+Phase 4 (Observability)         <- AdamW, metrics, checkpoints
   |
-Phase 5 (Corpus)                <- Needs BPE tokenizer
+Phase 5 (BPE)                   <- Needs mini-batch (too much data for full-batch)
   |
-Phase 6 (Scaling + Worker)      <- Needs everything above
+Phase 6 (Corpus)                <- Needs BPE tokenizer
   |
-Phase 7 (Generation + KV cache) <- Needs trained model + tokenizer
+Phase 7 (Scaling + Worker)      <- Needs everything above
   |
-Phase 8 (Viz adaptations)       <- Polish, do last
+Phase 8 (Generation + KV cache) <- Needs trained model + tokenizer
+  |
+Phase 9 (Viz adaptations)       <- Polish, do last
 ```
 
 Build and verify after each phase. Each phase should leave the app fully functional.

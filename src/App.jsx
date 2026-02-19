@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { softmax } from "./model/math.js";
 import { createTinyTransformer, forward, countParameters } from "./model/transformer.js";
-import { trainStepBackprop, verifyGradients } from "./model/training.js";
+import { trainStepMiniBatch, createAdamState, getLearningRate, verifyGradients } from "./model/training.js";
 import { DEFAULT_SENTENCES, buildVocabulary, makeTrainingData, generatePrompts } from "./model/data.js";
 
 import PredictionPanel from "./components/PredictionPanel.jsx";
@@ -20,7 +20,12 @@ export default function App() {
     seqLen: 10,
     numBlocks: 1,
   });
-  const [learningRate, setLearningRate] = useState(0.01);
+  const [learningRate, setLearningRate] = useState(0.001);
+  const [batchSize, setBatchSize] = useState(32);
+  const [useAdam, setUseAdam] = useState(true);
+  const [useLRSchedule, setUseLRSchedule] = useState(true);
+  const [warmupSteps, setWarmupSteps] = useState(100);
+  const [totalSteps, setTotalSteps] = useState(5000);
 
   // Sentences
   const [sentences, setSentences] = useState(DEFAULT_SENTENCES);
@@ -57,6 +62,12 @@ export default function App() {
   const promptsRef = useRef([]);
   const id2wordRef = useRef({});
   const logBufferRef = useRef([]);
+  const adamStateRef = useRef(null);
+  const batchSizeRef = useRef(32);
+  const useAdamRef = useRef(true);
+  const useLRScheduleRef = useRef(true);
+  const warmupStepsRef = useRef(100);
+  const totalStepsRef = useRef(5000);
 
   // Derived data
   const vocab = useMemo(() => buildVocabulary(sentences), [sentences]);
@@ -89,6 +100,7 @@ export default function App() {
     setIsPlaying(false);
     playingRef.current = false;
     paramsRef.current = createTinyTransformer(activeConfig);
+    adamStateRef.current = createAdamState(paramsRef.current, activeConfig);
     trainingData.current = makeTrainingData(sentences, word2id);
     const count = countParameters(paramsRef.current);
     setParamCount(count);
@@ -100,7 +112,7 @@ export default function App() {
     setProbs(Array(vocabSize).fill(1 / vocabSize));
     setSelectedPrompt((prev) => Math.min(prev, Math.max(0, prompts.length - 1)));
 
-    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${vocabSize} vocab | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads`, "config");
+    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${vocabSize} vocab | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads | Adam`, "config");
 
     // Verify gradients in development
     if (import.meta.env.DEV && trainingData.current.length > 0) {
@@ -126,6 +138,11 @@ export default function App() {
   activeConfigRef.current = activeConfig;
   promptsRef.current = prompts;
   id2wordRef.current = id2word;
+  batchSizeRef.current = batchSize;
+  useAdamRef.current = useAdam;
+  useLRScheduleRef.current = useLRSchedule;
+  warmupStepsRef.current = warmupSteps;
+  totalStepsRef.current = totalSteps;
 
   // Update visualization (used for manual step & prompt changes)
   const updateVisualization = useCallback(
@@ -146,7 +163,12 @@ export default function App() {
   const doStep = useCallback(() => {
     if (!paramsRef.current) return;
     const cfg = activeConfigRef.current;
-    const loss = trainStepBackprop(paramsRef.current, trainingData.current, cfg, learningRateRef.current);
+    const baseLR = learningRateRef.current;
+    const lr = useLRScheduleRef.current
+      ? getLearningRate(stepRef.current, warmupStepsRef.current, totalStepsRef.current, baseLR)
+      : baseLR;
+    const adam = useAdamRef.current ? adamStateRef.current : null;
+    const loss = trainStepMiniBatch(paramsRef.current, trainingData.current, cfg, lr, batchSizeRef.current, adam);
     stepRef.current += 1;
     setStep(stepRef.current);
     setLossHistory((h) => {
@@ -189,9 +211,14 @@ export default function App() {
       const params = paramsRef.current;
       if (!params || !cfg) return;
 
-      const batchSize = maxSpeedRef.current ? 10 : 1;
-      for (let i = 0; i < batchSize && mounted && playingRef.current; i++) {
-        const loss = trainStepBackprop(params, trainingData.current, cfg, learningRateRef.current);
+      const stepsPerFrame = maxSpeedRef.current ? 10 : 1;
+      for (let i = 0; i < stepsPerFrame && mounted && playingRef.current; i++) {
+        const baseLR = learningRateRef.current;
+        const lr = useLRScheduleRef.current
+          ? getLearningRate(stepRef.current, warmupStepsRef.current, totalStepsRef.current, baseLR)
+          : baseLR;
+        const adam = useAdamRef.current ? adamStateRef.current : null;
+        const loss = trainStepMiniBatch(params, trainingData.current, cfg, lr, batchSizeRef.current, adam);
         stepRef.current += 1;
         lossBufferRef.current.push(loss);
         vizDirtyRef.current = true;
@@ -305,6 +332,7 @@ export default function App() {
     setIsPlaying(false);
     playingRef.current = false;
     paramsRef.current = createTinyTransformer(activeConfig);
+    adamStateRef.current = createAdamState(paramsRef.current, activeConfig);
     trainingData.current = makeTrainingData(sentences, word2id);
     setParamCount(countParameters(paramsRef.current));
     setStep(0);
@@ -363,6 +391,16 @@ export default function App() {
           }}
           learningRate={learningRate}
           onLearningRateChange={setLearningRate}
+          batchSize={batchSize}
+          onBatchSizeChange={setBatchSize}
+          useAdam={useAdam}
+          onUseAdamChange={setUseAdam}
+          useLRSchedule={useLRSchedule}
+          onUseLRScheduleChange={setUseLRSchedule}
+          warmupSteps={warmupSteps}
+          onWarmupStepsChange={setWarmupSteps}
+          totalSteps={totalSteps}
+          onTotalStepsChange={setTotalSteps}
           sentencesInput={sentencesInput}
           onSentencesInputChange={setSentencesInput}
           onApplySentences={handleApplySentences}
@@ -390,7 +428,7 @@ export default function App() {
             fontSize: 12,
             color: "#475569",
           }}>
-            {vocabSize} words · {activeConfig.embedDim}d · {activeConfig.numHeads} heads · {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""} · {paramCount.toLocaleString()} params · lr={learningRate}
+            {vocabSize} words · {activeConfig.embedDim}d · {activeConfig.numHeads} heads · {activeConfig.numBlocks} block{activeConfig.numBlocks > 1 ? "s" : ""} · {paramCount.toLocaleString()} params · {useAdam ? "Adam" : "SGD"} lr={learningRate} · batch={batchSize}
           </p>
         </div>
 

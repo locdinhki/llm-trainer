@@ -29,8 +29,8 @@ Transform the tiny educational transformer (~3K params, 11 words) into a near-pr
 | # | Phase | Description | Status |
 |---|-------|-------------|--------|
 | 1 | [Float32Array Migration](archive/phase-1-float32array/) | Replace JS Arrays with typed arrays for 2-4x speedup | Done |
-| 2 | [Architecture Modernization](phase-2-architecture/) | RoPE, RMSNorm, SiLU, SwiGLU, KV cache | Pending |
-| 3 | [Mini-Batch + Adam](phase-3-optimizer/) | Mini-batch SGD, Adam optimizer, LR schedule | Pending |
+| 2 | [Architecture Modernization](archive/phase-2-architecture/) | RoPE, RMSNorm, SiLU, SwiGLU, KV cache | Done |
+| 3 | [Mini-Batch + Adam](archive/phase-3-optimizer/) | Mini-batch SGD, Adam optimizer, LR schedule | Done |
 | 4 | [BPE Tokenizer](phase-4-bpe/) | Byte-Pair Encoding from scratch | Pending |
 | 5 | [Expanded Corpus](phase-5-corpus/) | ~150 curated sentences with preset selector | Pending |
 | 6 | [Model Scaling + Worker](phase-6-scaling/) | Expanded config, dropout, Web Worker integration | Pending |

@@ -112,6 +112,111 @@ export function trainStepBackprop(params, trainingData, config, lr) {
   return totalLoss;
 }
 
+// --- 3A: Mini-batch training ---
+
+export function trainStepMiniBatch(params, trainingData, config, lr, batchSize, adamState) {
+  const n = trainingData.length;
+  const actualBatch = Math.min(batchSize, n);
+  const grads = createZeroGrads(params, config);
+  let totalLoss = 0;
+
+  // Random sampling without replacement (Fisher-Yates partial shuffle)
+  const indices = new Array(n);
+  for (let i = 0; i < n; i++) indices[i] = i;
+  for (let i = 0; i < actualBatch; i++) {
+    const j = i + Math.floor(Math.random() * (n - i));
+    const tmp = indices[i]; indices[i] = indices[j]; indices[j] = tmp;
+  }
+
+  for (let i = 0; i < actualBatch; i++) {
+    const { input, target } = trainingData[indices[i]];
+    const { logits, cache } = forwardWithCache(params, input, config);
+    const probs = softmax(logits);
+    totalLoss -= Math.log(probs[target] + 1e-10);
+    backward(params, cache, target, config, grads);
+  }
+
+  totalLoss /= actualBatch;
+  scaleGrads(grads, 1 / actualBatch);
+
+  if (adamState) {
+    adamUpdate(params, grads, adamState, lr);
+  } else {
+    applyGradients(params, grads, lr, 5.0);
+  }
+
+  return totalLoss;
+}
+
+// --- 3B: Adam optimizer ---
+
+export function createAdamState(params, config) {
+  return {
+    m: createZeroGrads(params, config),
+    v: createZeroGrads(params, config),
+    t: 0,
+  };
+}
+
+function adamUpdateArray1D(p, g, m, v, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm) {
+  for (let i = 0; i < p.length; i++) {
+    const gc = clipGrad(g[i], maxNorm);
+    m[i] = beta1 * m[i] + (1 - beta1) * gc;
+    v[i] = beta2 * v[i] + (1 - beta2) * gc * gc;
+    const mHat = m[i] * mHatScale;
+    const vHat = v[i] * vHatScale;
+    p[i] -= lr * mHat / (Math.sqrt(vHat) + eps);
+  }
+}
+
+function adamUpdateArray2D(p, g, m, v, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm) {
+  for (let i = 0; i < p.length; i++) {
+    adamUpdateArray1D(p[i], g[i], m[i], v[i], lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+  }
+}
+
+export function adamUpdate(params, grads, state, lr, beta1 = 0.9, beta2 = 0.999, eps = 1e-8) {
+  state.t += 1;
+  const maxNorm = 5.0;
+  const mHatScale = 1 / (1 - Math.pow(beta1, state.t));
+  const vHatScale = 1 / (1 - Math.pow(beta2, state.t));
+
+  // 2D params
+  for (const key of ["embedding", "Wout"]) {
+    adamUpdateArray2D(params[key], grads[key], state.m[key], state.v[key], lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+  }
+  // 1D params
+  adamUpdateArray1D(params.bout, grads.bout, state.m.bout, state.v.bout, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+  // Per-block params
+  for (let b = 0; b < params.blocks.length; b++) {
+    const pBlock = params.blocks[b];
+    const gBlock = grads.blocks[b];
+    const mBlock = state.m.blocks[b];
+    const vBlock = state.v.blocks[b];
+    for (const key of Object.keys(pBlock)) {
+      const p = pBlock[key];
+      const g = gBlock[key];
+      const mB = mBlock[key];
+      const vB = vBlock[key];
+      if (p[0]?.length !== undefined) {
+        adamUpdateArray2D(p, g, mB, vB, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+      } else {
+        adamUpdateArray1D(p, g, mB, vB, lr, beta1, beta2, eps, mHatScale, vHatScale, maxNorm);
+      }
+    }
+  }
+}
+
+// --- 3C: Learning rate schedule (warmup + cosine decay) ---
+
+export function getLearningRate(step, warmupSteps, totalSteps, baseLR) {
+  if (step < warmupSteps) {
+    return baseLR * (step / warmupSteps);
+  }
+  const progress = (step - warmupSteps) / (totalSteps - warmupSteps);
+  return baseLR * 0.5 * (1 + Math.cos(Math.PI * Math.min(progress, 1)));
+}
+
 // --- Numerical gradient verification (for debugging) ---
 
 export function verifyGradients(params, trainingData, config) {

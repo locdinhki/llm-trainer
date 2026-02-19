@@ -27,6 +27,11 @@ function SettingRow({ label, children }) {
 export default function SettingsPanel({
   config, onConfigChange,
   learningRate, onLearningRateChange,
+  batchSize, onBatchSizeChange,
+  useAdam, onUseAdamChange,
+  useLRSchedule, onUseLRScheduleChange,
+  warmupSteps, onWarmupStepsChange,
+  totalSteps, onTotalStepsChange,
   sentencesInput, onSentencesInputChange,
   onApplySentences,
   paramCount,
@@ -137,17 +142,98 @@ export default function SettingsPanel({
         <SettingRow label={`Learning Rate: ${learningRate.toFixed(4)}`}>
           <input
             type="range"
-            min={0.001}
-            max={0.1}
-            step={0.001}
+            min={0.0001}
+            max={useAdam ? 0.01 : 0.1}
+            step={0.0001}
             value={learningRate}
             onChange={(e) => onLearningRateChange(Number(e.target.value))}
             style={{ width: "100%", accentColor: "#6366f1" }}
           />
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
-            <span>0.001</span><span>0.1</span>
+            <span>0.0001</span><span>{useAdam ? "0.01" : "0.1"}</span>
           </div>
         </SettingRow>
+
+        <SettingRow label="Optimizer">
+          <SegmentedControl
+            options={["Adam", "SGD"]}
+            value={useAdam ? "Adam" : "SGD"}
+            onChange={(v) => {
+              onUseAdamChange(v === "Adam");
+              if (v === "Adam" && learningRate > 0.01) onLearningRateChange(0.001);
+              if (v === "SGD" && learningRate < 0.005) onLearningRateChange(0.01);
+            }}
+          />
+        </SettingRow>
+
+        <SettingRow label={`Batch Size: ${batchSize}`}>
+          <SegmentedControl
+            options={[4, 8, 16, 32]}
+            value={batchSize}
+            onChange={onBatchSizeChange}
+          />
+        </SettingRow>
+
+        <SectionLabel text="LR Schedule" />
+
+        <SettingRow label="Warmup + Cosine Decay">
+          <div
+            onClick={() => onUseLRScheduleChange(!useLRSchedule)}
+            style={{
+              display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+              padding: "6px 10px",
+              background: useLRSchedule ? "rgba(99, 102, 241, 0.15)" : "rgba(255,255,255,0.04)",
+              border: `1px solid ${useLRSchedule ? "rgba(99,102,241,0.3)" : "rgba(255,255,255,0.08)"}`,
+              borderRadius: 6,
+            }}
+          >
+            <div style={{
+              width: 14, height: 14, borderRadius: 3,
+              background: useLRSchedule ? "#6366f1" : "rgba(255,255,255,0.1)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 10, color: "white", fontWeight: 700,
+            }}>
+              {useLRSchedule ? "✓" : ""}
+            </div>
+            <span style={{ fontSize: 11, color: useLRSchedule ? "#a5b4fc" : "#64748b" }}>
+              Enabled
+            </span>
+          </div>
+        </SettingRow>
+
+        {useLRSchedule && (
+          <>
+            <SettingRow label={`Warmup Steps: ${warmupSteps}`}>
+              <input
+                type="range"
+                min={0}
+                max={500}
+                step={10}
+                value={warmupSteps}
+                onChange={(e) => onWarmupStepsChange(Number(e.target.value))}
+                style={{ width: "100%", accentColor: "#6366f1" }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
+                <span>0</span><span>500</span>
+              </div>
+            </SettingRow>
+
+            <SettingRow label={`Total Steps: ${totalSteps.toLocaleString()}`}>
+              <input
+                type="range"
+                min={500}
+                max={20000}
+                step={500}
+                value={totalSteps}
+                onChange={(e) => onTotalStepsChange(Number(e.target.value))}
+                style={{ width: "100%", accentColor: "#6366f1" }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
+                <span>500</span><span>20,000</span>
+              </div>
+            </SettingRow>
+          </>
+        )}
 
         <SectionLabel text="Training Sentences" />
 

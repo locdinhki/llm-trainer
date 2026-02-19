@@ -1,10 +1,10 @@
-import { trainStepBackprop } from "./training.js";
-import { forward } from "./transformer.js";
+import { trainStepMiniBatch, createAdamState, getLearningRate } from "./training.js";
+import { createTinyTransformer, forward, countParameters } from "./transformer.js";
 import { softmax } from "./math.js";
-import { createTinyTransformer } from "./transformer.js";
-import { makeTrainingData, buildVocabulary } from "./data.js";
+import { makeTrainingData, buildWordTokenizer, buildBPETokenizer } from "./data.js";
 
 let params = null;
+let adamState = null;
 let trainingData = null;
 let config = null;
 
@@ -13,43 +13,50 @@ self.onmessage = (e) => {
 
   switch (type) {
     case "init": {
-      // Rebuild model and data from config + sentences
-      config = payload.config;
+      const { config: cfg, sentences, tokenizerConfig } = payload;
+      config = cfg;
+      const tokenizer = tokenizerConfig.mode === "bpe"
+        ? buildBPETokenizer(sentences, tokenizerConfig.bpeVocabSize)
+        : buildWordTokenizer(sentences);
+      config = { ...config, vocabSize: tokenizer.vocabSize };
       params = createTinyTransformer(config);
-      const vocab = buildVocabulary(payload.sentences);
-      trainingData = makeTrainingData(payload.sentences, vocab.word2id);
+      adamState = createAdamState(params, config);
+      trainingData = makeTrainingData(sentences, tokenizer);
       self.postMessage({
         type: "initResult",
-        payload: {
-          params,
-          paramCount: countParams(params),
-        },
+        payload: { paramCount: countParameters(params) },
       });
       break;
     }
 
-    case "setParams": {
-      // Receive updated params from main thread (e.g. after reset)
-      params = payload.params;
-      config = payload.config;
-      trainingData = payload.trainingData;
-      break;
-    }
-
-    case "train": {
+    case "trainBatch": {
       if (!params || !trainingData || !config) {
-        self.postMessage({ type: "trainResult", payload: { losses: [], steps: 0 } });
+        self.postMessage({ type: "trainBatchResult", payload: { losses: [], gradNorms: [], lrs: [], steps: 0 } });
         break;
       }
-      const { lr, steps } = payload;
+      const { lr, steps, batchSize, weightDecay, useAdam, useLRSchedule, warmupSteps, totalSteps, startStep } = payload;
       const losses = [];
+      const gradNorms = [];
+      const lrs = [];
+      let currentStep = startStep;
+
       for (let i = 0; i < steps; i++) {
-        const loss = trainStepBackprop(params, trainingData, config, lr);
+        const effectiveLR = useLRSchedule
+          ? getLearningRate(currentStep, warmupSteps, totalSteps, lr)
+          : lr;
+        const adam = useAdam ? adamState : null;
+        const wd = useAdam ? weightDecay : 0;
+        const { loss, gradNorm } = trainStepMiniBatch(params, trainingData, config, effectiveLR, batchSize, adam, wd);
         losses.push(loss);
+        gradNorms.push(gradNorm);
+        lrs.push(effectiveLR);
+        currentStep += 1;
       }
+
+      // Send results back (params snapshot for visualization)
       self.postMessage({
-        type: "trainResult",
-        payload: { params, losses },
+        type: "trainBatchResult",
+        payload: { losses, gradNorms, lrs, steps, params },
       });
       break;
     }
@@ -72,18 +79,12 @@ self.onmessage = (e) => {
       });
       break;
     }
+
+    case "setConfig": {
+      if (payload.config) {
+        config = { ...config, ...payload.config };
+      }
+      break;
+    }
   }
 };
-
-function countParams(p) {
-  let count = 0;
-  function c(arr) {
-    if (arr[0]?.length !== undefined) arr.forEach((r) => (count += r.length));
-    else count += arr.length;
-  }
-  c(p.embedding); c(p.Wout); c(p.bout);
-  for (const block of p.blocks) {
-    for (const key of Object.keys(block)) c(block[key]);
-  }
-  return count;
-}

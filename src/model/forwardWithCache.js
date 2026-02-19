@@ -1,4 +1,4 @@
-import { matVec, vecAdd, vecMul, rmsNorm, softmax, silu } from "./math.js";
+import { matVec, vecAdd, vecMul, rmsNorm, softmax, silu, gelu, relu } from "./math.js";
 import { precomputeFreqs, applyRoPE } from "./rope.js";
 
 // Forward pass that caches all intermediates needed for backward pass.
@@ -75,9 +75,21 @@ export function forwardWithCache(params, tokens, config) {
       bc.attnWeights.push(headWeights);
     }
 
-    // Wo projection + first residual
+    // Wo projection + first residual (with optional dropout)
     const attnProj = bc.attnOutputs.map((h) => vecAdd(matVec(block.Wo, h), block.bo));
-    hidden = hidden.map((h, i) => vecAdd(h, attnProj[i]));
+    const dropoutRate = config.dropout || 0;
+    if (dropoutRate > 0) {
+      const scale = 1 / (1 - dropoutRate);
+      bc.attnDropoutMask = attnProj.map((h) => {
+        const mask = new Float32Array(h.length);
+        for (let i = 0; i < h.length; i++) mask[i] = Math.random() < dropoutRate ? 0 : scale;
+        return mask;
+      });
+      hidden = hidden.map((h, i) => vecAdd(h, vecMul(attnProj[i], bc.attnDropoutMask[i])));
+    } else {
+      bc.attnDropoutMask = null;
+      hidden = hidden.map((h, i) => vecAdd(h, attnProj[i]));
+    }
 
     // Cache pre-LN2 hidden states
     bc.preNorm2 = hidden.map((h) => h.slice());
@@ -85,15 +97,27 @@ export function forwardWithCache(params, tokens, config) {
     // Layer norm 2
     bc.normed2 = hidden.map((h) => rmsNorm(h, block.ln2_g));
 
-    // SwiGLU FFN: gate = silu(W_gate @ x), up = W1 @ x, out = W2 @ (gate * up)
+    // GLU FFN: gate = activation(W_gate @ x), up = W1 @ x, out = W2 @ (gate * up)
+    const activationFn = { silu, gelu, relu }[config.activation] || silu;
     bc.gatePre = bc.normed2.map((h) => vecAdd(matVec(block.W_gate, h), block.b_gate));
-    bc.gate = bc.gatePre.map((h) => silu(h));
+    bc.gate = bc.gatePre.map((h) => activationFn(h));
     bc.up = bc.normed2.map((h) => vecAdd(matVec(block.W1, h), block.b1));
     bc.gated = bc.gate.map((g, i) => vecMul(g, bc.up[i]));
     const ffn2 = bc.gated.map((h) => vecAdd(matVec(block.W2, h), block.b2));
 
-    // Second residual
-    hidden = hidden.map((h, i) => vecAdd(h, ffn2[i]));
+    // Second residual (with optional dropout)
+    if (dropoutRate > 0) {
+      const scale = 1 / (1 - dropoutRate);
+      bc.ffnDropoutMask = ffn2.map((h) => {
+        const mask = new Float32Array(h.length);
+        for (let i = 0; i < h.length; i++) mask[i] = Math.random() < dropoutRate ? 0 : scale;
+        return mask;
+      });
+      hidden = hidden.map((h, i) => vecAdd(h, vecMul(ffn2[i], bc.ffnDropoutMask[i])));
+    } else {
+      bc.ffnDropoutMask = null;
+      hidden = hidden.map((h, i) => vecAdd(h, ffn2[i]));
+    }
 
     blockCaches.push(bc);
   }

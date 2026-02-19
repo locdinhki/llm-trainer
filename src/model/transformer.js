@@ -1,4 +1,4 @@
-import { mulberry32, matVec, vecAdd, vecMul, rmsNorm, softmax, silu } from "./math.js";
+import { mulberry32, matVec, vecAdd, vecMul, rmsNorm, softmax, silu, gelu, relu } from "./math.js";
 import { precomputeFreqs, applyRoPE } from "./rope.js";
 
 export function createTinyTransformer(config) {
@@ -109,8 +109,9 @@ export function forward(params, tokens, config) {
     hidden = hidden.map((h, i) => vecAdd(h, attnProj[i]));
 
     const normed2 = hidden.map((h) => rmsNorm(h, block.ln2_g));
-    // SwiGLU: gate = silu(W_gate @ x), up = W1 @ x, out = W2 @ (gate * up)
-    const gate = normed2.map((h) => silu(vecAdd(matVec(block.W_gate, h), block.b_gate)));
+    // GLU FFN: gate = activation(W_gate @ x), up = W1 @ x, out = W2 @ (gate * up)
+    const activationFn = { silu, gelu, relu }[config.activation] || silu;
+    const gate = normed2.map((h) => activationFn(vecAdd(matVec(block.W_gate, h), block.b_gate)));
     const up = normed2.map((h) => vecAdd(matVec(block.W1, h), block.b1));
     const gated = gate.map((g, i) => vecMul(g, up[i]));
     const ffn2 = gated.map((h) => vecAdd(matVec(block.W2, h), block.b2));

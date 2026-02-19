@@ -3,7 +3,9 @@ import { useRef, useState, useCallback, useEffect } from "react";
 export function useTrainingWorker() {
   const workerRef = useRef(null);
   const [supported] = useState(() => typeof Worker !== "undefined");
-  const pendingRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const onTrainResultRef = useRef(null);
+  const pendingRef = useRef(null); // For one-shot requests (init, forward)
 
   useEffect(() => {
     if (!supported) return;
@@ -14,17 +16,26 @@ export function useTrainingWorker() {
       );
       workerRef.current.onmessage = (e) => {
         const { type, payload } = e.data;
-        if (pendingRef.current && pendingRef.current.type === type) {
+        if (type === "trainBatchResult") {
+          onTrainResultRef.current?.(payload);
+        } else if (pendingRef.current && pendingRef.current.type === type) {
           pendingRef.current.resolve(payload);
           pendingRef.current = null;
         }
       };
+      workerRef.current.onerror = () => {
+        workerRef.current = null;
+        setReady(false);
+      };
+      setReady(true);
     } catch {
       workerRef.current = null;
+      setReady(false);
     }
     return () => {
       workerRef.current?.terminate();
       workerRef.current = null;
+      setReady(false);
     };
   }, [supported]);
 
@@ -39,30 +50,27 @@ export function useTrainingWorker() {
     });
   }, []);
 
-  const initWorker = useCallback((config, sentences) => {
-    return sendAndWait("init", { config, sentences }, "initResult");
+  const initWorker = useCallback((config, sentences, tokenizerConfig) => {
+    return sendAndWait("init", { config, sentences, tokenizerConfig }, "initResult");
   }, [sendAndWait]);
 
-  const train = useCallback((lr, steps = 1) => {
-    return sendAndWait("train", { lr, steps }, "trainResult");
-  }, [sendAndWait]);
+  // trainBatch: callback-based for streaming results
+  const trainBatch = useCallback((payload, onResult) => {
+    onTrainResultRef.current = onResult;
+    if (workerRef.current) {
+      workerRef.current.postMessage({ type: "trainBatch", payload });
+    }
+  }, []);
 
   const forwardPass = useCallback((tokens) => {
     return sendAndWait("forward", { tokens }, "forwardResult");
   }, [sendAndWait]);
 
-  const setParams = useCallback((params, config, trainingData) => {
-    if (workerRef.current) {
-      workerRef.current.postMessage({ type: "setParams", payload: { params, config, trainingData } });
-    }
-  }, []);
-
   return {
     initWorker,
-    train,
+    trainBatch,
     forwardPass,
-    setParams,
-    supported: supported && workerRef.current !== null,
+    supported: supported && ready,
     workerRef,
   };
 }

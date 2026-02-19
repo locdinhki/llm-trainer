@@ -256,12 +256,14 @@ export function getLearningRate(step, warmupSteps, totalSteps, baseLR) {
 // --- Numerical gradient verification (for debugging) ---
 
 export function verifyGradients(params, trainingData, config) {
+  // Disable dropout for gradient verification (stochastic forward breaks numerical diff)
+  const verifyConfig = { ...config, dropout: 0 };
   const eps = 1e-3; // larger eps for Float32Array precision (~7 digits vs ~15 for Float64)
-  const grads = createZeroGrads(params, config);
+  const grads = createZeroGrads(params, verifyConfig);
 
   for (const { input, target } of trainingData) {
-    const { cache } = forwardWithCache(params, input, config);
-    backward(params, cache, target, config, grads);
+    const { cache } = forwardWithCache(params, input, verifyConfig);
+    backward(params, cache, target, verifyConfig, grads);
   }
   scaleGrads(grads, 1 / trainingData.length);
 
@@ -281,9 +283,9 @@ export function verifyGradients(params, trainingData, config) {
   for (const { name, get, set, grad: analyticalGrad } of checkParams) {
     const orig = get();
     set(orig + eps);
-    const lossPlus = computeLoss(params, trainingData, config);
+    const lossPlus = computeLoss(params, trainingData, verifyConfig);
     set(orig - eps);
-    const lossMinus = computeLoss(params, trainingData, config);
+    const lossMinus = computeLoss(params, trainingData, verifyConfig);
     set(orig);
     const numericalGrad = (lossPlus - lossMinus) / (2 * eps);
 

@@ -20,8 +20,8 @@ Expand configurable options to support larger models (up to ~300K params) and wi
 - `src/App.jsx`
 
 ## Verification
-- [ ] All preset configs create valid models
-- [ ] Param count display matches actual count
-- [ ] Web Worker: training runs off main thread
-- [ ] UI stays at 60fps during max-speed training with Web Worker
-- [ ] Fallback to main thread if Worker unavailable
+- [x] All preset configs create valid models
+- [x] Param count display matches actual count
+- [x] Web Worker: training runs off main thread
+- [x] UI stays at 60fps during max-speed training with Web Worker
+- [x] Fallback to main thread if Worker unavailable

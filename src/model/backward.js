@@ -1,4 +1,4 @@
-import { softmax, vecAddInPlace, vecMul, siluBackward } from "./math.js";
+import { softmax, vecAddInPlace, vecMul, siluBackward, geluBackward } from "./math.js";
 import { precomputeFreqs, applyRoPEBackward } from "./rope.js";
 
 // --- Backward primitives ---
@@ -166,17 +166,22 @@ export function backward(params, cache, target, config, grads) {
     const gBlock = grads.blocks[blockIdx];
     const bc = cache.blocks[blockIdx];
 
-    // --- Second residual backward ---
-    // hidden_out = hidden_pre_ffn + ffn2
-    // dHidden flows to both branches
+    // --- Second residual backward (with optional dropout) ---
+    // hidden_out = hidden_pre_ffn + dropout(ffn2)
+    // dHidden flows to both branches; apply dropout mask if present
     const dFfn2 = new Array(len);
     for (let pos = 0; pos < len; pos++) {
-      dFfn2[pos] = dHidden[pos].slice(); // copy, since residual keeps dHidden
+      if (bc.ffnDropoutMask) {
+        dFfn2[pos] = vecMul(dHidden[pos], bc.ffnDropoutMask[pos]);
+      } else {
+        dFfn2[pos] = dHidden[pos].slice();
+      }
     }
 
-    // --- SwiGLU FFN backward ---
-    // Forward was: gate = silu(W_gate @ normed2 + b_gate), up = W1 @ normed2 + b1
+    // --- GLU FFN backward ---
+    // Forward was: gate = activation(W_gate @ normed2 + b_gate), up = W1 @ normed2 + b1
     //              gated = gate * up, ffn2 = W2 @ gated + b2
+    const activationBackwardFn = { silu: siluBackward, gelu: geluBackward, relu: reluBackward }[config.activation] || siluBackward;
     for (let pos = 0; pos < len; pos++) {
       // W2 backward: ffn2 = matVec(W2, gated) + b2
       const { dMat: dW2, dVec: dGated } = matVecBackward(block.W2, bc.gated[pos], dFfn2[pos]);
@@ -187,8 +192,8 @@ export function backward(params, cache, target, config, grads) {
       const dGate = vecMul(dGated, bc.up[pos]);
       const dUp = vecMul(dGated, bc.gate[pos]);
 
-      // Gate backward: gate = silu(W_gate @ normed2 + b_gate)
-      const dGatePre = siluBackward(bc.gatePre[pos], dGate);
+      // Gate backward: gate = activation(W_gate @ normed2 + b_gate)
+      const dGatePre = activationBackwardFn(bc.gatePre[pos], dGate);
       const { dMat: dW_gate, dVec: dNormed2_gate } = matVecBackward(block.W_gate, bc.normed2[pos], dGatePre);
       addMat(gBlock.W_gate, dW_gate);
       vecAddInPlace(gBlock.b_gate, dGatePre);
@@ -213,12 +218,16 @@ export function backward(params, cache, target, config, grads) {
       vecAddInPlace(dHidden[pos], dPreNorm2);
     }
 
-    // --- First residual backward ---
-    // hidden_post_attn = hidden_pre_attn + attnProj
-    // dHidden flows to both branches
+    // --- First residual backward (with optional dropout) ---
+    // hidden_post_attn = hidden_pre_attn + dropout(attnProj)
+    // dHidden flows to both branches; apply dropout mask if present
     const dAttnProj = new Array(len);
     for (let pos = 0; pos < len; pos++) {
-      dAttnProj[pos] = dHidden[pos].slice();
+      if (bc.attnDropoutMask) {
+        dAttnProj[pos] = vecMul(dHidden[pos], bc.attnDropoutMask[pos]);
+      } else {
+        dAttnProj[pos] = dHidden[pos].slice();
+      }
     }
 
     // --- Wo backward: attnProj[pos] = matVec(Wo, attnOutputs[pos]) + bo ---

@@ -4,6 +4,7 @@ import { createTinyTransformer, forward, countParameters } from "./model/transfo
 import { trainStepMiniBatch, createAdamState, getLearningRate, verifyGradients } from "./model/training.js";
 import { DEFAULT_SENTENCES, CORPUS_PRESETS, computeCorpusStats, buildWordTokenizer, buildBPETokenizer, CATEGORY_COLORS, makeTrainingData, generatePrompts } from "./model/data.js";
 import { saveCheckpoint, loadCheckpoint } from "./model/checkpoint.js";
+import { useTrainingWorker } from "./model/useTrainingWorker.js";
 
 import PredictionPanel from "./components/PredictionPanel.jsx";
 import EmbeddingPanel from "./components/EmbeddingPanel.jsx";
@@ -22,6 +23,8 @@ export default function App() {
     seqLen: 10,
     numBlocks: 1,
   });
+  const [activation, setActivation] = useState("silu"); // "silu" | "gelu" | "relu"
+  const [dropout, setDropout] = useState(0.0);
   const [learningRate, setLearningRate] = useState(0.001);
   const [batchSize, setBatchSize] = useState(32);
   const [useAdam, setUseAdam] = useState(true);
@@ -29,6 +32,12 @@ export default function App() {
   const [warmupSteps, setWarmupSteps] = useState(100);
   const [totalSteps, setTotalSteps] = useState(5000);
   const [weightDecay, setWeightDecay] = useState(0.01);
+
+  // Web Worker
+  const { initWorker, trainBatch, supported: workerSupported } = useTrainingWorker();
+  const [useWorker, setUseWorker] = useState(true);
+  const useWorkerRef = useRef(true);
+  const workerReadyRef = useRef(false);
 
   // Tokenizer
   const [tokenizerMode, setTokenizerMode] = useState("word"); // "word" | "bpe"
@@ -102,7 +111,9 @@ export default function App() {
   const activeConfig = useMemo(() => ({
     ...config,
     vocabSize,
-  }), [config, vocabSize]);
+    activation,
+    dropout,
+  }), [config, vocabSize, activation, dropout]);
 
   const [paramCount, setParamCount] = useState(0);
 
@@ -136,7 +147,9 @@ export default function App() {
     setSelectedPrompt((prev) => Math.min(prev, Math.max(0, prompts.length - 1)));
 
     const tokLabel = tokenizerMode === "bpe" ? `BPE(${vocabSize})` : `word(${vocabSize})`;
-    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${tokLabel} | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads | AdamW`, "config");
+    const actLabel = (activeConfig.activation || "silu").toUpperCase();
+    const dropLabel = activeConfig.dropout ? ` | drop=${activeConfig.dropout}` : "";
+    addLog(`[Init] Model created: ${count.toLocaleString()} params | ${tokLabel} | ${activeConfig.numBlocks} block${activeConfig.numBlocks > 1 ? "s" : ""} | ${activeConfig.embedDim}d | ${activeConfig.numHeads} heads | ${actLabel}${dropLabel} | AdamW`, "config");
 
     // Verify gradients in development
     if (import.meta.env.DEV && trainingData.current.length > 0) {
@@ -153,6 +166,21 @@ export default function App() {
       setAttnWeights(result.attnWeights);
       setEmbeddingSnapshot(paramsRef.current.embedding.map((e) => [...e]));
     }
+
+    // Initialize worker (if available)
+    workerReadyRef.current = false;
+    if (workerSupported) {
+      const tokConfig = { mode: tokenizerMode, bpeVocabSize };
+      initWorker(activeConfig, sentences, tokConfig).then((result) => {
+        if (result) {
+          workerReadyRef.current = true;
+          addLog(`[Worker] Initialized`, "config");
+        } else {
+          workerReadyRef.current = false;
+          setUseWorker(false);
+        }
+      });
+    }
   }, [configKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep refs in sync with state (avoids stale closures in training loop)
@@ -168,6 +196,7 @@ export default function App() {
   warmupStepsRef.current = warmupSteps;
   totalStepsRef.current = totalSteps;
   weightDecayRef.current = weightDecay;
+  useWorkerRef.current = useWorker;
 
   // Update visualization (used for manual step & prompt changes)
   const updateVisualization = useCallback(
@@ -242,8 +271,98 @@ export default function App() {
     logBufferRef.current = [];
     vizDirtyRef.current = false;
 
-    // Training loop — runs as fast as possible, doesn't touch React state
-    const trainLoop = () => {
+    const shouldUseWorker = useWorkerRef.current && workerReadyRef.current;
+
+    // --- Worker-based training loop ---
+    const workerTrainLoop = () => {
+      if (!mounted || !playingRef.current) return;
+
+      const stepsPerBatch = maxSpeedRef.current ? 20 : 5;
+      trainBatch({
+        lr: learningRateRef.current,
+        steps: stepsPerBatch,
+        batchSize: batchSizeRef.current,
+        weightDecay: useAdamRef.current ? weightDecayRef.current : 0,
+        useAdam: useAdamRef.current,
+        useLRSchedule: useLRScheduleRef.current,
+        warmupSteps: warmupStepsRef.current,
+        totalSteps: totalStepsRef.current,
+        startStep: stepRef.current,
+      }, (result) => {
+        if (!mounted) return;
+
+        // Update paramsRef with worker's snapshot (for viz)
+        if (result.params) paramsRef.current = result.params;
+
+        // Push to buffers
+        for (let i = 0; i < result.losses.length; i++) {
+          lossBufferRef.current.push(result.losses[i]);
+          gradNormBufferRef.current.push(result.gradNorms[i]);
+          lrBufferRef.current.push(result.lrs[i]);
+        }
+
+        stepRef.current += result.steps;
+        vizDirtyRef.current = true;
+
+        // Log entry from worker results
+        if (result.params && result.losses.length > 0) {
+          const lastLoss = result.losses[result.losses.length - 1];
+          const prompt = promptsRef.current[selectedPromptRef.current] || promptsRef.current[0];
+          if (prompt) {
+            const cfg = activeConfigRef.current;
+            const res = forward(result.params, prompt.tokens, cfg);
+            const p = softmax(res.logits);
+            let topIdx = 0;
+            for (let k = 1; k < p.length; k++) { if (p[k] > p[topIdx]) topIdx = k; }
+            const topWord = id2wordRef.current[topIdx];
+            const topProb = p[topIdx];
+            const correct = topWord === prompt.target;
+            if (!maxSpeedRef.current || stepRef.current % 20 === 0) {
+              logBufferRef.current.push({
+                message: `[Step ${stepRef.current}] Loss: ${lastLoss.toFixed(4)} | "${prompt.target}" → "${topWord}" (${(topProb * 100).toFixed(1)}%) ${correct ? "✓" : "✗"}`,
+                type: correct ? "success" : "warning",
+              });
+            }
+          }
+
+          // Convergence check every 50 steps
+          if (stepRef.current % 50 < result.steps) {
+            const allPrompts = promptsRef.current;
+            const cfg = activeConfigRef.current;
+            let allCorrect = allPrompts.length > 0;
+            for (let pi = 0; pi < allPrompts.length; pi++) {
+              const pr = allPrompts[pi];
+              const res = forward(result.params, pr.tokens, cfg);
+              const p = softmax(res.logits);
+              let top = 0;
+              for (let k = 1; k < p.length; k++) { if (p[k] > p[top]) top = k; }
+              if (id2wordRef.current[top] !== pr.target) { allCorrect = false; break; }
+            }
+            if (allCorrect) {
+              logBufferRef.current.push({
+                message: `[Step ${stepRef.current}] All ${allPrompts.length} prompts correct — training complete`,
+                type: "success",
+              });
+              playingRef.current = false;
+              setIsPlaying(false);
+              return; // Don't schedule next loop
+            }
+          }
+        }
+
+        // Continue loop
+        if (mounted && playingRef.current) {
+          if (maxSpeedRef.current) {
+            setTimeout(workerTrainLoop, 0);
+          } else {
+            setTimeout(workerTrainLoop, Math.max(50, 500 / speed));
+          }
+        }
+      });
+    };
+
+    // --- Main-thread training loop (fallback) ---
+    const mainTrainLoop = () => {
       if (!mounted || !playingRef.current) return;
       const cfg = activeConfigRef.current;
       const params = paramsRef.current;
@@ -308,9 +427,9 @@ export default function App() {
 
       if (!playingRef.current) return;
       if (maxSpeedRef.current) {
-        setTimeout(trainLoop, 0);
+        setTimeout(mainTrainLoop, 0);
       } else {
-        setTimeout(trainLoop, Math.max(50, 500 / speed));
+        setTimeout(mainTrainLoop, Math.max(50, 500 / speed));
       }
     };
 
@@ -381,14 +500,19 @@ export default function App() {
       rafId = requestAnimationFrame(renderLoop);
     };
 
-    trainLoop();
+    // Choose training path
+    if (shouldUseWorker) {
+      workerTrainLoop();
+    } else {
+      mainTrainLoop();
+    }
     rafId = requestAnimationFrame(renderLoop);
 
     return () => {
       mounted = false;
       cancelAnimationFrame(rafId);
     };
-  }, [isPlaying, speed]);
+  }, [isPlaying, speed, trainBatch]);
 
   // Reset
   const handleReset = () => {
@@ -407,6 +531,14 @@ export default function App() {
     if (prompts.length > 0) {
       updateVisualization(paramsRef.current, 0);
     }
+    // Re-initialize worker so it also resets its params/adam state
+    if (workerSupported) {
+      workerReadyRef.current = false;
+      const tokConfig = { mode: tokenizerMode, bpeVocabSize };
+      initWorker(activeConfig, sentences, tokConfig).then((result) => {
+        workerReadyRef.current = !!result;
+      });
+    }
     addLog("[Reset] Model re-initialized", "config");
   };
 
@@ -417,6 +549,10 @@ export default function App() {
       updateVisualization(paramsRef.current, idx);
     }
   };
+
+  // Snap seqLen to valid discrete options
+  const SEQ_LEN_OPTIONS = [10, 16, 24, 32, 48];
+  const snapSeqLen = (minRequired) => SEQ_LEN_OPTIONS.find((v) => v >= minRequired) || 48;
 
   // Switch corpus preset
   const handleCorpusChange = useCallback((preset) => {
@@ -429,7 +565,7 @@ export default function App() {
     const maxLen = Math.max(...newSentences.map((s) => s.split(/\s+/).length));
     setSentences(newSentences);
     setSentencesInput(newSentences.join("\n"));
-    setConfig((prev) => ({ ...prev, seqLen: Math.max(4, maxLen + 2) }));
+    setConfig((prev) => ({ ...prev, seqLen: snapSeqLen(maxLen + 2) }));
     addLog(`[Config] Loaded '${corpus.label}' corpus (${stats.sentenceCount} sentences, ${stats.uniqueWords} unique words)`, "config");
   }, [addLog]);
 
@@ -443,7 +579,7 @@ export default function App() {
     const maxLen = Math.max(...lines.map((s) => s.split(/\s+/).length));
     setSentences(lines);
     setCorpusPreset("custom");
-    setConfig((prev) => ({ ...prev, seqLen: Math.max(prev.seqLen, maxLen + 2) }));
+    setConfig((prev) => ({ ...prev, seqLen: snapSeqLen(Math.max(prev.seqLen, maxLen + 2)) }));
     setShowSettings(false);
     addLog(`[Config] Applied ${lines.length} custom sentences`, "config");
   };
@@ -521,6 +657,10 @@ export default function App() {
             setIsPlaying(false);
             setConfig(newConfig);
           }}
+          activation={activation}
+          onActivationChange={(v) => { setIsPlaying(false); setActivation(v); }}
+          dropout={dropout}
+          onDropoutChange={(v) => { setIsPlaying(false); setDropout(v); }}
           learningRate={learningRate}
           onLearningRateChange={setLearningRate}
           batchSize={batchSize}

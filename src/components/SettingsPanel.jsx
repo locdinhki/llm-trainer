@@ -2,6 +2,13 @@ import { useMemo } from "react";
 import SegmentedControl from "./controls/SegmentedControl.jsx";
 import { computeCorpusStats } from "../model/data.js";
 
+const PRESETS = [
+  { label: "Tiny",   embedDim: 16, numBlocks: 1, numHeads: 2, ffnDim: 32  },
+  { label: "Small",  embedDim: 32, numBlocks: 2, numHeads: 4, ffnDim: 96  },
+  { label: "Medium", embedDim: 48, numBlocks: 3, numHeads: 4, ffnDim: 128 },
+  { label: "Large",  embedDim: 64, numBlocks: 4, numHeads: 8, ffnDim: 256 },
+];
+
 function SectionLabel({ text }) {
   return (
     <div style={{
@@ -28,6 +35,8 @@ function SettingRow({ label, children }) {
 
 export default function SettingsPanel({
   config, onConfigChange,
+  activation, onActivationChange,
+  dropout, onDropoutChange,
   learningRate, onLearningRateChange,
   batchSize, onBatchSizeChange,
   useAdam, onUseAdamChange,
@@ -47,10 +56,25 @@ export default function SettingsPanel({
   onClose,
 }) {
   const corpusStats = useMemo(() => computeCorpusStats(sentences), [sentences]);
-  const embedDimOptions = [8, 16, 32];
-  const numHeadsOptions = [1, 2, 4].filter((h) => config.embedDim % h === 0);
-  const numBlocksOptions = [1, 2, 3, 4];
-  const ffnDimOptions = [1, 2, 3, 4].map((m) => m * config.embedDim);
+  const embedDimOptions = [16, 32, 48, 64];
+  const numHeadsOptions = [1, 2, 4, 6, 8, 12, 16].filter((h) => config.embedDim % h === 0 && h <= config.embedDim);
+  const numBlocksOptions = [1, 2, 3, 4, 6];
+  const ffnDimOptions = [2, 3, 4].map((m) => m * config.embedDim);
+
+  // Live parameter count estimate from current settings
+  const estimatedParams = useMemo(() => {
+    const { embedDim, numBlocks, ffnDim } = config;
+    const V = tokenizer.vocabSize;
+    const D = embedDim;
+    const B = numBlocks;
+    const F = ffnDim;
+    const embParams = V * D * 2; // embedding + unembedding
+    const blockParams = 4 * D * D + 4 * D + 3 * F * D + 3 * F + 2 * D; // attn + FFN + norms
+    const outBias = V;
+    return embParams + B * blockParams + outBias;
+  }, [config, tokenizer.vocabSize]);
+
+  const isLargeConfig = config.embedDim >= 64 && config.numBlocks >= 4;
 
   return (
     <>
@@ -86,6 +110,60 @@ export default function SettingsPanel({
           </button>
         </div>
 
+        <SectionLabel text="Presets" />
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {PRESETS.map(({ label, ...preset }) => {
+            const isActive = config.embedDim === preset.embedDim && config.numBlocks === preset.numBlocks
+              && config.numHeads === preset.numHeads && config.ffnDim === preset.ffnDim;
+            const isLarge = label === "Large";
+            return (
+              <button
+                key={label}
+                onClick={() => onConfigChange({ ...config, ...preset })}
+                style={{
+                  flex: 1,
+                  padding: "8px 0",
+                  borderRadius: 8,
+                  border: isActive
+                    ? "1px solid rgba(99, 102, 241, 0.5)"
+                    : isLarge
+                      ? "1px solid rgba(251, 146, 60, 0.4)"
+                      : "1px solid rgba(255,255,255,0.08)",
+                  background: isActive
+                    ? "rgba(99, 102, 241, 0.15)"
+                    : isLarge
+                      ? "rgba(251, 146, 60, 0.08)"
+                      : "rgba(255,255,255,0.06)",
+                  color: isActive ? "#a5b4fc" : isLarge ? "#fb923c" : "#94a3b8",
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {isLargeConfig && (
+          <div style={{
+            marginBottom: 12,
+            padding: "8px 12px",
+            borderRadius: 8,
+            background: "rgba(251, 146, 60, 0.08)",
+            border: "1px solid rgba(251, 146, 60, 0.25)",
+            fontSize: 10,
+            color: "#fb923c",
+            fontFamily: "'JetBrains Mono', monospace",
+            lineHeight: 1.5,
+          }}>
+            Large config (~{estimatedParams.toLocaleString()} params). Training may be slow in-browser.
+          </div>
+        )}
+
         <SectionLabel text="Model Architecture" />
 
         <SettingRow label="Embedding Dim">
@@ -96,7 +174,7 @@ export default function SettingsPanel({
               let newNumHeads = config.numHeads;
               if (v % newNumHeads !== 0) newNumHeads = 1;
               let newFfnDim = config.ffnDim;
-              if (newFfnDim < v || newFfnDim > v * 4) newFfnDim = v * 2;
+              if (newFfnDim < v * 2 || newFfnDim > v * 4) newFfnDim = v * 2;
               onConfigChange({ ...config, embedDim: v, numHeads: newNumHeads, ffnDim: newFfnDim });
             }}
           />
@@ -126,25 +204,36 @@ export default function SettingsPanel({
           />
         </SettingRow>
 
-
         <SettingRow label="Max Sequence Length">
-          <input
-            type="number"
-            min={4}
-            max={32}
+          <SegmentedControl
+            options={[10, 16, 24, 32, 48]}
             value={config.seqLen}
-            onChange={(e) => onConfigChange({ ...config, seqLen: Math.max(4, Math.min(32, Number(e.target.value))) })}
-            style={{
-              width: "100%",
-              background: "rgba(255,255,255,0.06)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: 6,
-              color: "#e2e8f0",
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 12,
-              padding: "6px 10px",
-            }}
+            onChange={(v) => onConfigChange({ ...config, seqLen: v })}
           />
+        </SettingRow>
+
+        <SettingRow label="Activation Function">
+          <SegmentedControl
+            options={["silu", "gelu", "relu"]}
+            value={activation}
+            onChange={onActivationChange}
+            formatLabel={(v) => v.toUpperCase()}
+          />
+        </SettingRow>
+
+        <SettingRow label={`Dropout: ${dropout.toFixed(2)}`}>
+          <input
+            type="range"
+            min={0}
+            max={0.3}
+            step={0.05}
+            value={dropout}
+            onChange={(e) => onDropoutChange(Number(e.target.value))}
+            style={{ width: "100%", accentColor: "#6366f1" }}
+          />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
+            <span>0.00</span><span>0.30</span>
+          </div>
         </SettingRow>
 
         <SectionLabel text="Tokenization" />
@@ -240,7 +329,7 @@ export default function SettingsPanel({
 
         <SettingRow label={`Batch Size: ${batchSize}`}>
           <SegmentedControl
-            options={[4, 8, 16, 32]}
+            options={[4, 8, 16, 32, 64]}
             value={batchSize}
             onChange={onBatchSizeChange}
           />
@@ -428,6 +517,11 @@ export default function SettingsPanel({
         <div style={{ marginTop: 20, padding: 12, background: "rgba(255,255,255,0.03)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)" }}>
           <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>Model Parameters</div>
           <div style={{ fontSize: 18, color: "#a78bfa", fontWeight: 700 }}>{paramCount.toLocaleString()}</div>
+          {estimatedParams !== paramCount && (
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
+              New config: ~{estimatedParams.toLocaleString()} params
+            </div>
+          )}
         </div>
 
         <div style={{ marginTop: 12, fontSize: 10, color: "#f97316", opacity: 0.7 }}>
